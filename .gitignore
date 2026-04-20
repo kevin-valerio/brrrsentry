@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.DS_Store
+.serena/
+.tmp-gosentry/
+*.log
+*.tmp
+WORKLOG.md

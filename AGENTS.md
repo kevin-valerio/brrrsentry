@@ -1,0 +1,52 @@
+This file is memory for the `brrrsentry` project.
+
+Project goal
+
+`brrrsentry` is an agentic fuzzing application built around GoSentry.
+It should help a user go from:
+
+1. choosing a target directory
+2. answering adaptive fuzzing questions in a full-screen TUI
+3. discovering good fuzz targets
+4. generating a campaign workspace under `.brrrsentry/`
+5. generating harness, grammar, corpus, and campaign notes
+6. asking before the real fuzzing run starts
+
+Current product decisions
+
+- Project name is `brrrsentry`
+- Main stack is TypeScript + Node.js
+- UI is a full-screen TUI
+- OpenAI is enabled by default
+- Default model is `gpt-5.2`
+- Default reasoning effort is `xhigh`
+- CLI flags must be able to override model, reasoning, and GoSentry path
+- Prompt files in `prompts/` are source material; do not blindly paste them as runtime prompts
+- Generated artifacts must live inside the target repo under `.brrrsentry/`
+- GoSentry is vendored as a git submodule, but runtime must also allow a path override
+- The app must ask before starting a real fuzzing campaign
+- We want mixed-language differential fuzzing plans from day one
+
+Important implementation notes
+
+- Use official OpenAI docs before changing the OpenAI integration
+- Prefer the official OpenAI docs MCP server when working on OpenAI integration:
+  `https://developers.openai.com/mcp`
+- Use `third_party/gosentry/README.md` and `third_party/gosentry/misc/gosentry/nautilus/prompt.md` before changing GoSentry integration
+- Grammar mode in GoSentry works best with a single `[]byte` or `string` fuzz input
+- GoSentry supports struct-aware fuzzing, panic-on-call, race/leak catching, grammar fuzzing, and coverage replay
+
+Repository map
+
+- `src/` contains the TypeScript application
+- `docs/` contains project notes and tool decisions
+- `prompts/` contains the user-provided fuzzing source prompts
+- `third_party/gosentry/` is the GoSentry submodule
+
+Near-term focus
+
+- Keep the first version thin but real
+- Prefer generating honest templates over fake “magic” harnesses
+- If we can infer a simple one-argument Go entrypoint, generate a runnable harness
+- If not, generate a clear manual-follow-up template and notes
+
