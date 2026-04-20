@@ -1,4 +1,4 @@
-`brrrsentry` is an agentic harness and GoSentry campaign generator.
+`brrrsentry` is an agentic harness and gosentry campaign generator.
 
 Current scope
 
@@ -7,7 +7,7 @@ Current scope
 - adaptive question flow
 - optional OpenAI ranking and campaign planning
 - `.brrrsentry/` campaign generation
-- GoSentry path override support
+- gosentry path override support
 - generated `fuzz.bash`, `FUZZ.md`, and `FOUND_ISSUES.md`
 
 Current status
@@ -61,7 +61,7 @@ OpenAI behavior
 - set `OPENAI_API_KEY` to enable model-backed ranking/planning
 - use `--no-openai` to disable model calls
 
-GoSentry behavior
+gosentry behavior
 
 - default path: `third_party/gosentry`
 - override with `--gosentry-path`
@@ -72,5 +72,11 @@ Repo notes
 - project memory: [AGENTS.md](/Users/kevinvalerio/Desktop/tooling/brrrsentry/AGENTS.md)
 - worklog: [WORKLOG.md](/Users/kevinvalerio/Desktop/tooling/brrrsentry/WORKLOG.md)
 - OpenAI notes: [docs/openai-notes.md](/Users/kevinvalerio/Desktop/tooling/brrrsentry/docs/openai-notes.md)
-- GoSentry notes: [docs/gosentry-notes.md](/Users/kevinvalerio/Desktop/tooling/brrrsentry/docs/gosentry-notes.md)
+- gosentry notes: [docs/gosentry-notes.md](/Users/kevinvalerio/Desktop/tooling/brrrsentry/docs/gosentry-notes.md)
 
+Local prompt material
+
+- `prompts/` is ignored by git on purpose.
+- If you have local fuzzing prompt material, place it in `prompts/1.md`, `prompts/2.md`, `prompts/3.md`.
+- brrrsentry uses it as optional extra context for OpenAI calls.
+- Core campaign guidelines are tracked in code (`src/guidelines.ts`) and are always included in planning and in generated `FUZZ.md`.

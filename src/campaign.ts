@@ -7,6 +7,7 @@ import type {
   CandidateTarget,
   GeneratedCampaign,
 } from "./types.js";
+import { formatGuidelinesForFuzzDoc } from "./guidelines.js";
 
 function toKebabCase(input: string): string {
   return input
@@ -40,7 +41,7 @@ export function createFallbackPlan(
     oracleStrategy:
       scopeMode === "differential"
         ? "Compare target acceptance decisions against an external oracle CLI wired through BRRRSENTRY_ORACLE_BIN."
-        : "Use target crashes, panics, hangs, and GoSentry detectors as the first oracle.",
+        : "Use target crashes, panics, hangs, and gosentry detectors as the first oracle.",
     harnessStrategy:
       canAutoWireGoHarness(target)
         ? "Generate a package-level Go harness for the selected function."
@@ -221,6 +222,8 @@ function buildFuzzDoc(plan: CampaignPlan): string {
     `Fuzz mode: ${plan.fuzzMode}`,
     `Scope mode: ${plan.scopeMode}`,
     "",
+    formatGuidelinesForFuzzDoc().trimEnd(),
+    "",
     "Oracle strategy",
     "",
     plan.oracleStrategy,
@@ -312,7 +315,7 @@ function buildFuzzScript(
     'CORES="${CORES:-0}"',
     "",
     'if [[ ! -x "$GOSENTRY_BIN" ]]; then',
-    '  echo "GoSentry binary not found at $GOSENTRY_BIN"',
+    '  echo "gosentry binary not found at $GOSENTRY_BIN"',
     '  echo "Build it first: (cd \\"$GOSENTRY_ROOT/src\\" && ./make.bash)"',
     "  exit 1",
     "fi",

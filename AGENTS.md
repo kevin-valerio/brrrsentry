@@ -2,7 +2,7 @@ This file is memory for the `brrrsentry` project.
 
 Project goal
 
-`brrrsentry` is an agentic fuzzing application built around GoSentry.
+`brrrsentry` is an agentic fuzzing application built around gosentry.
 It should help a user go from:
 
 1. choosing a target directory
@@ -20,10 +20,10 @@ Current product decisions
 - OpenAI is enabled by default
 - Default model is `gpt-5.2`
 - Default reasoning effort is `xhigh`
-- CLI flags must be able to override model, reasoning, and GoSentry path
+- CLI flags must be able to override model, reasoning, and gosentry path
 - Prompt files in `prompts/` are source material; do not blindly paste them as runtime prompts
 - Generated artifacts must live inside the target repo under `.brrrsentry/`
-- GoSentry is vendored as a git submodule, but runtime must also allow a path override
+- gosentry is vendored as a git submodule, but runtime must also allow a path override
 - The app must ask before starting a real fuzzing campaign
 - We want mixed-language differential fuzzing plans from day one
 
@@ -32,16 +32,16 @@ Important implementation notes
 - Use official OpenAI docs before changing the OpenAI integration
 - Prefer the official OpenAI docs MCP server when working on OpenAI integration:
   `https://developers.openai.com/mcp`
-- Use `third_party/gosentry/README.md` and `third_party/gosentry/misc/gosentry/nautilus/prompt.md` before changing GoSentry integration
-- Grammar mode in GoSentry works best with a single `[]byte` or `string` fuzz input
-- GoSentry supports struct-aware fuzzing, panic-on-call, race/leak catching, grammar fuzzing, and coverage replay
+- Use `third_party/gosentry/README.md` and `third_party/gosentry/misc/gosentry/nautilus/prompt.md` before changing gosentry integration
+- Grammar mode in gosentry works best with a single `[]byte` or `string` fuzz input
+- gosentry supports struct-aware fuzzing, panic-on-call, race/leak catching, grammar fuzzing, and coverage replay
 
 Repository map
 
 - `src/` contains the TypeScript application
 - `docs/` contains project notes and tool decisions
 - `prompts/` contains the user-provided fuzzing source prompts
-- `third_party/gosentry/` is the GoSentry submodule
+- `third_party/gosentry/` is the gosentry submodule
 
 Near-term focus
 
@@ -49,4 +49,3 @@ Near-term focus
 - Prefer generating honest templates over fake “magic” harnesses
 - If we can infer a simple one-argument Go entrypoint, generate a runnable harness
 - If not, generate a clear manual-follow-up template and notes
-

@@ -64,10 +64,13 @@ export async function rankTargetsWithOpenAI(
   config: AppConfig,
   discovery: DiscoveryResult,
   prompts: PromptSources,
+  context?: { fuzzMode?: FuzzMode; scopeMode?: ScopeMode },
 ): Promise<RankedTargetResult> {
   const client = createClient(config);
   const input = buildTargetRankingPrompt({
     targetDir: config.targetDir,
+    fuzzMode: context?.fuzzMode,
+    scopeMode: context?.scopeMode,
     candidatesSummary: summarizeCandidates(discovery.candidates.slice(0, 12)),
     sourcePromptText: prompts.combinedText,
   });
@@ -162,4 +165,3 @@ export async function buildCampaignPlanWithOpenAI(
       ],
   };
 }
-

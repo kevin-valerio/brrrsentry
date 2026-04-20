@@ -8,6 +8,7 @@ import {
   rankTargetsWithOpenAI,
 } from "./openai.js";
 import { loadPromptSources } from "./prompts.js";
+import { FUZZING_GUIDELINES } from "./guidelines.js";
 import type {
   AppConfig,
   CampaignPlan,
@@ -45,7 +46,7 @@ const modeChoices: StepChoice[] = [
   {
     key: "struct-aware",
     label: "Struct-aware fuzzing",
-    description: "Useful when GoSentry can feed composite Go inputs directly.",
+    description: "Useful when gosentry can feed composite Go inputs directly.",
   },
   {
     key: "grammar",
@@ -245,6 +246,12 @@ export async function runTui(config: AppConfig): Promise<void> {
       renderChoices(list, actions);
       renderDetails(
         [
+          "Key guidelines:",
+          ...FUZZING_GUIDELINES.slice(0, 4).flatMap((section) => [
+            `${section.title}:`,
+            ...section.bullets.slice(0, 2).map((bullet) => `- ${bullet}`),
+            "",
+          ]),
           `Title: ${state.plan.title}`,
           `Target: ${state.plan.target.symbol}`,
           `Path: ${state.plan.target.relativePath}`,
@@ -291,15 +298,27 @@ export async function runTui(config: AppConfig): Promise<void> {
     state.discovery = await discoverTargets(config.targetDir);
     pushLog(logBox, `Static candidates found: ${state.discovery.candidates.length}`);
 
+    const goFirst = state.discovery.candidates.filter(
+      (candidate) => candidate.language === "go",
+    );
+    if (goFirst.length > 0) {
+      state.discovery.recommended = goFirst.slice(0, 3);
+    }
+
     if (isOpenAIReady(config) && state.discovery.candidates.length > 0) {
       pushLog(logBox, "Ranking candidates with OpenAI...");
       try {
-        const ranked = await rankTargetsWithOpenAI(config, state.discovery, prompts);
+        const ranked = await rankTargetsWithOpenAI(config, state.discovery, prompts, {
+          fuzzMode: state.fuzzMode,
+          scopeMode: state.scopeMode,
+        });
         const chosen = ranked.recommendedIds
           .map((id) => state.discovery?.candidates.find((candidate) => candidate.id === id))
           .filter((candidate): candidate is CandidateTarget => candidate !== undefined);
         if (chosen.length > 0) {
-          state.discovery.recommended = chosen;
+          const chosenGo = chosen.filter((candidate) => candidate.language === "go");
+          state.discovery.recommended =
+            chosenGo.length > 0 ? chosenGo.slice(0, 3) : chosen.slice(0, 3);
         }
         for (const note of ranked.notes) {
           pushLog(logBox, `OpenAI: ${note}`);
@@ -414,4 +433,3 @@ export async function runTui(config: AppConfig): Promise<void> {
   redraw();
   list.focus();
 }
-

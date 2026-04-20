@@ -8,9 +8,9 @@ export function parseArgs(argv: string[]): AppConfig {
 
   program
     .name("brrrsentry")
-    .description("Agentic GoSentry campaign generator")
+    .description("Agentic gosentry campaign generator")
     .argument("<targetDir>", "directory to fuzz")
-    .option("--gosentry-path <path>", "override the GoSentry root path")
+    .option("--gosentry-path <path>", "override the gosentry root path")
     .option("--model <model>", "OpenAI model", "gpt-5.2")
     .option(
       "--reasoning-effort <effort>",
