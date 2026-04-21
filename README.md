@@ -69,7 +69,6 @@ node dist/index.js /path/to/target-repo
 | `--gosentry-path <path>` | Override the gosentry root path | `third_party/gosentry` |
 | `--model <model>` | Model for ranking and planning | `gpt-5.2` |
 | `--reasoning-effort <effort>` | Reasoning effort | `xhigh` |
-| `--api-base-url <url>` | Override the API base URL | unset |
 
 ## Model calls
 

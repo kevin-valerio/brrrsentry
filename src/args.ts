@@ -16,8 +16,7 @@ export function parseArgs(argv: string[]): AppConfig {
       "--reasoning-effort <effort>",
       "reasoning effort (low|medium|high|xhigh)",
       "xhigh",
-    )
-    .option("--api-base-url <url>", "override the API base URL");
+    );
 
   program.parse(argv);
 
@@ -26,7 +25,6 @@ export function parseArgs(argv: string[]): AppConfig {
     gosentryPath?: string;
     model: string;
     reasoningEffort: string;
-    apiBaseUrl?: string;
   }>();
 
   if (!targetDirArg) {
@@ -49,6 +47,5 @@ export function parseArgs(argv: string[]): AppConfig {
     gosentryPath,
     model: options.model,
     reasoningEffort: options.reasoningEffort as ReasoningEffort,
-    apiBaseUrl: options.apiBaseUrl,
   };
 }

@@ -9,7 +9,6 @@ export interface AppConfig {
   gosentryPath: string;
   model: string;
   reasoningEffort: ReasoningEffort;
-  apiBaseUrl?: string;
 }
 
 export interface CandidateTarget {

@@ -26,10 +26,9 @@ export interface AutoJudgeResult {
   reason: string;
   fixed_harness_source?: string;
 }
-function createClient(config: AppConfig): OpenAI {
+function createClient(): OpenAI {
   return new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
-    baseURL: config.apiBaseUrl,
   });
 }
 
@@ -42,7 +41,7 @@ async function createJsonResponse<T>(
   input: string,
   callbacks?: ModelProgressCallbacks,
 ): Promise<T> {
-  const client = createClient(config);
+  const client = createClient();
   const stream = client.responses.stream({
     model: config.model,
     reasoning: {
