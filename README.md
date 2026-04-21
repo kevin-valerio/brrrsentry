@@ -79,6 +79,9 @@ node dist/index.js /path/to/target-repo
 `OPENAI_API_KEY` is required. `brrrsentry` calls the model API to discover
 targets and draft the campaign plan.
 
+Requests are sent with `store: false`, so they are not saved in the OpenAI
+dashboard logs.
+
 While the model is discovering targets or drafting the plan, the status pane shows
 a live gray model progress summary (high-level only, no raw chain-of-thought).
 The selector is also briefly locked after each choice so a fast double Enter

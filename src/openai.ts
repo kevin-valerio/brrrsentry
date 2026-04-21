@@ -47,6 +47,7 @@ async function createJsonResponse<T>(
 ): Promise<T> {
   const client = createClient();
   const stream = client.responses.stream({
+    store: false,
     model: config.model,
     reasoning: {
       effort: config.reasoningEffort,
