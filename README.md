@@ -77,8 +77,9 @@ node dist/index.js /path/to/target-repo
 discovered targets and draft the campaign plan.
 
 While the model is ranking targets or drafting the plan, the status pane shows
-a live gray reasoning summary. The selector is also briefly locked after each
-choice so a fast double Enter cannot select the next step twice.
+a live gray model progress summary (high-level only, no raw chain-of-thought).
+The selector is also briefly locked after each choice so a fast double Enter
+cannot select the next step twice.
 
 ## gosentry
 

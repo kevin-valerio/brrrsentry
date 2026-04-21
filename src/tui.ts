@@ -341,7 +341,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     top: 0,
     left: 0,
     width: "100%",
-    height: 6,
+    height: 7,
     tags: true,
     wrap: true,
     style: { fg: "white" },
@@ -389,10 +389,10 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   const logBox = blessed.log({
     parent: statusBox,
-    top: 6,
+    top: 7,
     left: 0,
     width: "100%",
-    height: "100%-6",
+    height: "100%-7",
     tags: false,
     scrollable: true,
     alwaysScroll: true,
@@ -418,12 +418,15 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   const spinnerFrames = ["|", "/", "-", "\\"];
   let spinnerTimer: NodeJS.Timeout | undefined;
+  let modelProgressTimer: NodeJS.Timeout | undefined;
   let spinnerStartMs = 0;
   let spinnerPrefix = "";
   let statusPrimary = "";
   let statusDetail = "";
   let statusFlow = "";
   let spinnerIndex = 0;
+  let modelProgressSteps: string[] = [];
+  let modelProgressIndex = 0;
   let activeFuzz: ReturnType<typeof spawnStreaming> | null = null;
   let quitAfterFuzzStops = false;
   let inputLocked = false;
@@ -434,32 +437,49 @@ export async function runTui(config: AppConfig): Promise<void> {
       clearInterval(spinnerTimer);
       spinnerTimer = undefined;
     }
+    stopModelProgress();
+  }
+
+  function stopModelProgress(): void {
+    if (modelProgressTimer) {
+      clearInterval(modelProgressTimer);
+      modelProgressTimer = undefined;
+    }
+    modelProgressSteps = [];
+    modelProgressIndex = 0;
   }
 
   function formatStatusFlow(text: string): string {
-    const compact = text
+    const normalized = text
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line.length > 0)
-      .join(" ");
-    if (compact.length === 0) {
+      .join("\n");
+    if (normalized.length === 0) {
       return "";
     }
 
     const trimmed =
-      compact.length > statusFlowMaxChars
-        ? `...${compact.slice(-statusFlowMaxChars)}`
-        : compact;
-    return `Model flow: ${trimmed}`;
+      normalized.length > statusFlowMaxChars
+        ? `...${normalized.slice(-statusFlowMaxChars)}`
+        : normalized;
+    return trimmed;
   }
 
   function renderStatus(): void {
     const lines = [`{bold}${statusPrimary}{/bold}`];
     if (statusDetail.length > 0) {
-      lines.push(`{gray-fg}${blessed.escape(statusDetail)}{/gray-fg}`);
+      lines.push(`{gray-fg}Step: ${blessed.escape(statusDetail)}{/gray-fg}`);
     }
     if (statusFlow.length > 0) {
-      lines.push(`{gray-fg}${blessed.escape(statusFlow)}{/gray-fg}`);
+      lines.push(`{gray-fg}Model progress:{/gray-fg}`);
+      for (const line of statusFlow.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) {
+          continue;
+        }
+        lines.push(`{gray-fg}${blessed.escape(trimmed)}{/gray-fg}`);
+      }
     }
     statusLine.setContent(lines.join("\n"));
   }
@@ -475,6 +495,42 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   function setStatusFlow(text: string): void {
     statusFlow = formatStatusFlow(text);
+    renderStatus();
+    screen.render();
+  }
+
+  function startModelProgress(steps: string[], intervalMs = 1400): void {
+    stopModelProgress();
+    modelProgressSteps = steps.map((step) => step.trim()).filter(Boolean);
+    modelProgressIndex = 0;
+
+    if (modelProgressSteps.length === 0) {
+      return;
+    }
+
+    setStatusFlow(modelProgressSteps[0] ?? "");
+
+    if (modelProgressSteps.length < 2) {
+      return;
+    }
+
+    modelProgressTimer = setInterval(() => {
+      if (modelProgressIndex >= modelProgressSteps.length - 1) {
+        stopModelProgress();
+        return;
+      }
+
+      modelProgressIndex += 1;
+      setStatusFlow(modelProgressSteps[modelProgressIndex] ?? "");
+
+      if (modelProgressIndex >= modelProgressSteps.length - 1) {
+        stopModelProgress();
+      }
+    }, intervalMs);
+  }
+
+  function setStatusDetailLine(text: string): void {
+    statusDetail = text;
     renderStatus();
     screen.render();
   }
@@ -588,17 +644,21 @@ export async function runTui(config: AppConfig): Promise<void> {
       "",
       "{bold}Details{/bold}",
       "",
+      "{bold}Harness wiring{/bold}",
+      "",
+      "{bold}AUTO{/bold}: brrrsentry can generate a runnable harness and you can run fuzzing right away.",
+      "{bold}AUTO{/bold} works best for a simple Go function: public, not a method, 1 arg ([]byte or string).",
+      "{bold}MANUAL{/bold}: brrrsentry generates a template and notes. You must wire the harness to call the target (Run now will be blocked until then).",
+      "",
       `{bold}Path{/bold}: ${candidate.relativePath}`,
       `{bold}Signature{/bold}: ${candidate.signature}`,
       `{bold}Kind{/bold}: ${candidate.kind} {gray-fg}(score=${candidate.score}){/gray-fg}`,
-      candidate.importPath
-        ? `{bold}Import{/bold}: ${candidate.importPath}`
-        : "{bold}Import{/bold}: {gray-fg}(not inferred){/gray-fg}",
-      candidate.packageName
-        ? `{bold}Package{/bold}: ${candidate.packageName}`
-        : "{bold}Package{/bold}: {gray-fg}(unknown){/gray-fg}",
-      `{bold}Receiver{/bold}: ${candidate.hasReceiver ? "{red-fg}yes{/red-fg}" : "{green-fg}no{/green-fg}"}  {bold}Exported{/bold}: ${candidate.isExported ? "{green-fg}yes{/green-fg}" : "{red-fg}no{/red-fg}"}  {bold}Args{/bold}: ${candidate.argCount ?? 0}`,
-      `{bold}Input{/bold}: bytes=${candidate.acceptsBytes ? "{green-fg}yes{/green-fg}" : "{gray-fg}no{/gray-fg}"} string=${candidate.acceptsString ? "{green-fg}yes{/green-fg}" : "{gray-fg}no{/gray-fg}"}`,
+      ...(candidate.language === "go"
+        ? [
+            `{bold}Method{/bold}: ${candidate.hasReceiver ? "{red-fg}yes{/red-fg}" : "{green-fg}no{/green-fg}"}  {bold}Public{/bold}: ${candidate.isExported ? "{green-fg}yes{/green-fg}" : "{red-fg}no{/red-fg}"}  {bold}Args{/bold}: ${candidate.argCount ?? 0}`,
+            `{bold}Input{/bold}: bytes=${candidate.acceptsBytes ? "{green-fg}yes{/green-fg}" : "{gray-fg}no{/gray-fg}"} string=${candidate.acceptsString ? "{green-fg}yes{/green-fg}" : "{gray-fg}no{/gray-fg}"}`,
+          ]
+        : []),
       "",
       candidate.reasons.length > 0
         ? `{bold}Reasons{/bold}: ${candidate.reasons.join(", ")}`
@@ -813,12 +873,18 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   async function runDiscoveryFlow(): Promise<void> {
     startSpinner(
-      "Scanning target directory",
-      "Static scan: Go/Rust/C/C++ entrypoints",
+      "Scanning target directory for candidate files",
+      "Static scan: searching Go/Rust/C/C++ symbols",
     );
-    pushLog("Scanning target directory...");
-    state.discovery = await discoverTargets(config.targetDir);
-    pushLog(`Static candidates found: ${state.discovery.candidates.length}`);
+    pushLog("Scanning target directory for candidate files...");
+    state.discovery = await discoverTargets(config.targetDir, {
+      onProgress: (message) => {
+        setStatusDetailLine(message);
+        pushLog(`Static scan: ${message}`);
+      },
+    });
+    setStatusDetailLine(`Found ${state.discovery.candidates.length} static candidates`);
+    pushLog(`Found ${state.discovery.candidates.length} static candidates`);
 
     for (const note of state.discovery.notes) {
       pushLog(`Discovery: ${note}`);
@@ -831,10 +897,16 @@ export async function runTui(config: AppConfig): Promise<void> {
 
     const sentCandidates = Math.min(state.discovery.candidates.length, 12);
     startSpinner(
-      "Ranking targets",
-      `Model: ${config.model}/${config.reasoningEffort} | sent: ${sentCandidates}`,
+      "Scoring candidates by relevance to the request",
+      `Model: ${config.model}/${config.reasoningEffort} | candidates: ${state.discovery.candidates.length} | sent: ${sentCandidates}`,
     );
-    pushLog("Ranking targets...");
+    pushLog("Scoring candidates by relevance to the request...");
+    startModelProgress([
+      "scoring candidates by relevance to the request",
+      "comparing top matches",
+      "selecting the most likely targets for editing",
+      "validating selected targets",
+    ]);
 
     try {
       const ranked = await rankTargetsWithOpenAI(
@@ -845,10 +917,9 @@ export async function runTui(config: AppConfig): Promise<void> {
           fuzzMode: state.fuzzMode,
           scopeMode: state.scopeMode,
         },
-        {
-          onReasoningSummary: setStatusFlow,
-        },
+        undefined,
       );
+      setStatusFlow("validating selected targets");
       const chosen = ranked.recommendedIds
         .map((id) => state.discovery?.candidates.find((candidate) => candidate.id === id))
         .filter((candidate): candidate is CandidateTarget => candidate !== undefined);
@@ -866,6 +937,8 @@ export async function runTui(config: AppConfig): Promise<void> {
     } catch (error) {
       setStatus("Target ranking failed", (error as Error).message);
       throw error;
+    } finally {
+      stopModelProgress();
     }
 
     state.step = "target";
@@ -885,6 +958,12 @@ export async function runTui(config: AppConfig): Promise<void> {
       `Model: ${config.model}/${config.reasoningEffort} | target: ${target.symbol}`,
     );
     pushLog(`${planningMode} for ${target.symbol}...`);
+    startModelProgress([
+      "analyzing selected target",
+      "drafting harness strategy",
+      "drafting campaign plan",
+      "validating plan JSON",
+    ]);
 
     let plan = createFallbackPlan(target, state.fuzzMode, state.scopeMode);
 
@@ -895,10 +974,9 @@ export async function runTui(config: AppConfig): Promise<void> {
         target,
         state.fuzzMode,
         state.scopeMode,
-        {
-          onReasoningSummary: setStatusFlow,
-        },
+        undefined,
       );
+      setStatusFlow("validating plan JSON");
       plan = {
         ...plan,
         ...enriched,
@@ -907,6 +985,8 @@ export async function runTui(config: AppConfig): Promise<void> {
     } catch (error) {
       setStatus("Plan drafting failed", (error as Error).message);
       throw error;
+    } finally {
+      stopModelProgress();
     }
 
     state.plan = plan;
@@ -1073,23 +1153,38 @@ export async function runTui(config: AppConfig): Promise<void> {
       }
 
       startSpinner("Auto-judging findings", `Model: ${config.model}/${config.reasoningEffort}`);
-      const harnessSource = await fs.readFile(state.generated.harnessPath, "utf8");
-      const judgeResult = await autoJudgeFindingWithOpenAI(
-        config,
-        prompts,
-        {
-          plan: state.plan,
-          campaignRoot: state.generated.rootDir,
-          harnessPath: state.generated.harnessPath,
-          harnessSource,
-          libAflOutputDir: state.runLibAflOutputDir,
-          findings: state.runFindings,
-          runOutputTail: outputTail.join("\n"),
-        },
-        {
-          onReasoningSummary: setStatusFlow,
-        },
-      );
+      startModelProgress([
+        "reviewing findings and fuzzer output",
+        "deciding whether this looks like a harness issue",
+        "drafting a minimal harness fix if needed",
+        "validating verdict JSON",
+      ]);
+      const plan = state.plan!;
+      const generated = state.generated!;
+      const runFindings = state.runFindings!;
+      const harnessSource = await fs.readFile(generated.harnessPath, "utf8");
+      const judgeResult = await (async () => {
+        try {
+          const result = await autoJudgeFindingWithOpenAI(
+            config,
+            prompts,
+            {
+              plan,
+              campaignRoot: generated.rootDir,
+              harnessPath: generated.harnessPath,
+              harnessSource,
+              libAflOutputDir: state.runLibAflOutputDir,
+              findings: runFindings,
+              runOutputTail: outputTail.join("\n"),
+            },
+            undefined,
+          );
+          setStatusFlow("validating verdict JSON");
+          return result;
+        } finally {
+          stopModelProgress();
+        }
+      })();
       state.runAutoJudge = judgeResult;
 
       let appliedHarnessFix = false;
@@ -1099,7 +1194,7 @@ export async function runTui(config: AppConfig): Promise<void> {
         judgeResult.fixed_harness_source &&
         judgeResult.fixed_harness_source.trim().length > 0
       ) {
-        await fs.writeFile(state.generated.harnessPath, judgeResult.fixed_harness_source);
+        await fs.writeFile(generated.harnessPath, judgeResult.fixed_harness_source);
         appliedHarnessFix = true;
         pushFlow("");
         pushFlow("Auto-judge: applied harness fix.");

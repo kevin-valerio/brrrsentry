@@ -201,20 +201,26 @@ function parseRegexCandidates(
   return candidates;
 }
 
-export async function discoverTargets(targetDir: string): Promise<DiscoveryResult> {
+export async function discoverTargets(
+  targetDir: string,
+  callbacks?: { onProgress?: (message: string) => void },
+): Promise<DiscoveryResult> {
   const moduleInfo = await findGoModuleInfo(targetDir);
   const notes: string[] = [];
 
+  callbacks?.onProgress?.("Scanning Go files for candidate functions");
   const goMatches = await tryExecFile(
     "rg",
     ["-n", "func\\s+(\\([^)]*\\)\\s*)?[A-Za-z_][A-Za-z0-9_]*\\s*\\(", "--glob", "*.go", targetDir],
     targetDir,
   );
+  callbacks?.onProgress?.("Scanning Rust files for candidate functions");
   const rustMatches = await tryExecFile(
     "rg",
     ["-n", "\\bfn\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\(", "--glob", "*.rs", targetDir],
     targetDir,
   );
+  callbacks?.onProgress?.("Scanning C/C++ files for candidate functions");
   const cMatches = await tryExecFile(
     "rg",
     [
@@ -235,6 +241,13 @@ export async function discoverTargets(targetDir: string): Promise<DiscoveryResul
   const rustCandidates = rustMatches ? parseRegexCandidates(rustMatches, targetDir, "rust") : [];
   const cCandidates = cMatches ? parseRegexCandidates(cMatches, targetDir, "c") : [];
 
+  callbacks?.onProgress?.(`Go candidates found: ${goCandidates.length}`);
+  callbacks?.onProgress?.(`Rust candidates found: ${rustCandidates.length}`);
+  callbacks?.onProgress?.(`C/C++ candidates found: ${cCandidates.length}`);
+
+  if (goCandidates.length > 0) {
+    callbacks?.onProgress?.("Enriching Go candidates (reading package names)");
+  }
   const enrichedGoCandidates = await Promise.all(
     goCandidates.map(async (candidate) => ({
       ...candidate,
@@ -242,6 +255,7 @@ export async function discoverTargets(targetDir: string): Promise<DiscoveryResul
     })),
   );
 
+  callbacks?.onProgress?.("Scoring and selecting top candidates");
   const candidates = [...enrichedGoCandidates, ...rustCandidates, ...cCandidates]
     .sort((left, right) => right.score - left.score)
     .slice(0, 40);
