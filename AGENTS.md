@@ -35,6 +35,7 @@ Important implementation notes
 - Use `third_party/gosentry/README.md` and `third_party/gosentry/misc/gosentry/nautilus/prompt.md` before changing gosentry integration
 - Grammar mode in gosentry works best with a single `[]byte` or `string` fuzz input
 - gosentry supports struct-aware fuzzing, panic-on-call, race/leak catching, grammar fuzzing, and coverage replay
+- In the TUI, format long fields (especially target `reasons`) as multi-line bullets, not one long line
 
 Repository map
 

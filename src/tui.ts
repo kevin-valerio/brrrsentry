@@ -289,7 +289,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "green" } },
   });
 
-  const flowThinkingHeight = "35%";
+  const flowThinkingHeight = "40%";
 
   const rightPane = blessed.box({
     parent: screen,
@@ -364,7 +364,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     keys: true,
     vi: true,
     mouse: true,
-    style: { fg: "gray", border: { fg: "gray" } },
+    style: { fg: "white", border: { fg: "gray" } },
   });
 
   const list = blessed.list({
@@ -494,21 +494,33 @@ export async function runTui(config: AppConfig): Promise<void> {
     const shouldScrollToBottom = thinkingPane.getScrollPerc() >= 99;
     const lines: string[] = [];
 
-    if (thinkingProgressLines.length > 0) {
-      lines.push("Model progress:");
-      for (const line of thinkingProgressLines) {
-        lines.push(`- ${line}`);
-      }
+    const currentProgress = thinkingProgressLines.at(-1);
+    if (currentProgress) {
+      lines.push("Progress:");
+      lines.push(`- ${currentProgress}`);
     }
 
     const summary = normalizeThinkingSummary(thinkingReasoningSummary);
     if (summary.length > 0) {
-      if (lines.length > 0) {
-        lines.push("");
+      const summaryLines = summary
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .slice(0, 10);
+
+      if (summaryLines.length > 0) {
+        if (lines.length > 0) {
+          lines.push("");
+        }
+        lines.push("Summary:");
+        for (const line of summaryLines) {
+          if (/^[-*•]\s+/.test(line)) {
+            lines.push(line);
+          } else {
+            lines.push(`- ${line}`);
+          }
+        }
       }
-      lines.push("Model summary:");
-      lines.push("");
-      lines.push(summary);
     }
 
     if (lines.length === 0) {
@@ -707,9 +719,9 @@ export async function runTui(config: AppConfig): Promise<void> {
       "",
       "{bold}Harness wiring{/bold}",
       "",
-      "{bold}AUTO{/bold}: brrrsentry always generates a runnable harness.",
-      "{bold}AUTO{/bold}: it will compile-check the harness before continuing.",
-      "{bold}AUTO{/bold}: if the harness cannot be made to compile, brrrsentry will switch to the next target and tell you.",
+      "brrrsentry always generates a runnable harness.",
+      "It will compile-check the harness before continuing.",
+      "If the harness cannot be made to compile, brrrsentry will switch to the next target and tell you.",
       "",
       "{bold}Fast path{/bold}: exported package-level Go func with []byte/string input (and optional context.Context).",
       "{bold}Complex path{/bold}: brrrsentry asks the model to generate harness code + fixes it using compiler errors.",
@@ -723,11 +735,29 @@ export async function runTui(config: AppConfig): Promise<void> {
             `{bold}Input{/bold}: bytes=${candidate.acceptsBytes ? "{green-fg}yes{/green-fg}" : "{gray-fg}no{/gray-fg}"} string=${candidate.acceptsString ? "{green-fg}yes{/green-fg}" : "{gray-fg}no{/gray-fg}"}`,
           ]
         : []),
-      "",
-      candidate.reasons.length > 0
-        ? `{bold}Reasons{/bold}: ${candidate.reasons.join(", ")}`
-        : "{bold}Reasons{/bold}: {gray-fg}(none){/gray-fg}",
     );
+
+    lines.push("");
+
+    if (candidate.reasons.length > 0) {
+      lines.push("{bold}Reasons{/bold}:");
+      for (const reason of candidate.reasons) {
+        const safeReasonLines = blessed
+          .escape(reason)
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+        if (safeReasonLines.length === 0) {
+          continue;
+        }
+        lines.push(`- ${safeReasonLines[0]}`);
+        for (const extraLine of safeReasonLines.slice(1)) {
+          lines.push(`  ${extraLine}`);
+        }
+      }
+    } else {
+      lines.push("{bold}Reasons{/bold}: {gray-fg}(none){/gray-fg}");
+    }
 
     return lines.join("\n");
   }
