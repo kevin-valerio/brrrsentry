@@ -97,3 +97,59 @@ export function buildCampaignPlanPrompt(input: {
       : []),
   ].join("\n");
 }
+
+export function buildAutoJudgePrompt(input: {
+  targetDir: string;
+  campaignRoot: string;
+  fuzzMode: string;
+  scopeMode: string;
+  selectedTargetSummary: string;
+  harnessPath: string;
+  harnessSource: string;
+  libAflOutputDir?: string;
+  findingsSummary: string;
+  runOutputTail: string;
+  sourcePromptText: string;
+}): string {
+  const chunks: string[] = [
+    "Return JSON only.",
+    "You are brrrsentry auto-judge for fuzz findings.",
+    "",
+    "Goal: decide if the finding is a real target bug or a false positive (harness issue).",
+    "Be conservative: if the crash is not clearly a harness bug, treat it as a real target bug.",
+    "",
+    "If verdict is false_positive AND root_cause is harness:",
+    "- return a fixed harness file as full Go source code in fixed_harness_source",
+    "- keep the fix minimal and do not hide real target crashes",
+    "- do not change target repo code, only the harness file",
+    "",
+    'JSON format: {"verdict":"real_bug|false_positive|unclear","root_cause":"target|harness|environment|unknown","reason":"...","fixed_harness_source":"(optional)"}',
+    "",
+    `Target directory: ${input.targetDir}`,
+    `Campaign root: ${input.campaignRoot}`,
+    `Fuzz mode: ${input.fuzzMode}`,
+    `Scope mode: ${input.scopeMode}`,
+    `Harness path: ${input.harnessPath}`,
+    input.libAflOutputDir ? `LibAFL output dir: ${input.libAflOutputDir}` : "",
+    "",
+    "Selected target:",
+    input.selectedTargetSummary,
+    "",
+    "Findings:",
+    input.findingsSummary,
+    "",
+    "Harness source:",
+    input.harnessSource.trim().length > 0 ? input.harnessSource : "(empty)",
+    "",
+    "Fuzzer output tail:",
+    input.runOutputTail.trim().length > 0 ? input.runOutputTail : "(empty)",
+  ].filter((line) => line.length > 0);
+
+  if (input.sourcePromptText.trim().length > 0) {
+    chunks.push("");
+    chunks.push("Local prompt source material (optional):");
+    chunks.push(input.sourcePromptText);
+  }
+
+  return chunks.join("\n");
+}

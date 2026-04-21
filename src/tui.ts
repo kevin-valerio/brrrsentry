@@ -1,14 +1,18 @@
 import blessed from "blessed";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { writeCampaign, createFallbackPlan } from "./campaign.js";
 import { discoverTargets } from "./discovery.js";
 import {
+  autoJudgeFindingWithOpenAI,
   buildCampaignPlanWithOpenAI,
   rankTargetsWithOpenAI,
 } from "./openai.js";
 import { loadPromptSources } from "./prompts.js";
 import { FUZZING_GUIDELINES } from "./guidelines.js";
+import { spawnStreaming, type SpawnStreamingResult } from "./process.js";
 import type {
   AppConfig,
   CampaignPlan,
@@ -19,7 +23,14 @@ import type {
   ScopeMode,
 } from "./types.js";
 
-type StepName = "mode" | "scope" | "target" | "review" | "result";
+type StepName = "mode" | "scope" | "target" | "review" | "result" | "run";
+
+type FindingKind = "crash" | "hang" | "race" | "leak";
+
+interface FuzzFinding {
+  kind: FindingKind;
+  path: string;
+}
 
 interface StepChoice {
   key: string;
@@ -36,6 +47,12 @@ interface AppState {
   targetDetailsExpanded?: boolean;
   plan?: CampaignPlan;
   generated?: GeneratedCampaign;
+  runCores?: string;
+  runCommand?: string;
+  runLibAflOutputDir?: string;
+  runFindings?: FuzzFinding[];
+  runAutoJudge?: Awaited<ReturnType<typeof autoJudgeFindingWithOpenAI>>;
+  fuzzRunning?: boolean;
 }
 
 const modeChoices: StepChoice[] = [
@@ -89,7 +106,8 @@ function renderStepProgress(current: StepName): string {
     { key: "scope", label: "Scope" },
     { key: "target", label: "Target" },
     { key: "review", label: "Review" },
-    { key: "result", label: "Done" },
+    { key: "result", label: "Generate" },
+    { key: "run", label: "Run" },
   ];
   const currentIndex = Math.max(
     0,
@@ -159,9 +177,84 @@ function choiceFromIndex<T>(values: T[], index: number): T | undefined {
   return values[index];
 }
 
+function normalizeCoresInput(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return "0";
+  }
+
+  if (trimmed.includes(",")) {
+    const parts = trimmed
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    return parts.length > 0 ? parts.join(",") : "0";
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
+    return trimmed;
+  }
+
+  if (parsed <= 0) {
+    return "0";
+  }
+
+  return Array.from({ length: parsed }, (_value, index) => String(index)).join(",");
+}
+
+async function collectFindings(
+  libAflOutputDir: string,
+  options?: { sinceMs?: number },
+): Promise<FuzzFinding[]> {
+  const mappings: Array<{ kind: FindingKind; dir: string }> = [
+    { kind: "crash", dir: "crashes" },
+    { kind: "hang", dir: "hangs" },
+    { kind: "race", dir: "races" },
+    { kind: "leak", dir: "leaks" },
+  ];
+
+  const findings: FuzzFinding[] = [];
+
+  for (const mapping of mappings) {
+    const fullDir = path.join(libAflOutputDir, mapping.dir);
+    try {
+      const entries = await fs.readdir(fullDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) {
+          continue;
+        }
+        if (entry.name.startsWith(".")) {
+          continue;
+        }
+
+        const findingPath = path.join(fullDir, entry.name);
+        if (options?.sinceMs) {
+          try {
+            const stat = await fs.stat(findingPath);
+            if (stat.mtimeMs < options.sinceMs) {
+              continue;
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        findings.push({ kind: mapping.kind, path: findingPath });
+      }
+    } catch {
+      // missing dir is expected when no findings of that kind exist
+    }
+  }
+
+  return findings;
+}
+
 export async function runTui(config: AppConfig): Promise<void> {
   const prompts = await loadPromptSources(config.repoRoot);
   const state: AppState = { step: "mode" };
+  const inputUnlockDelayMs = 160;
+  const statusFlowMaxChars = 280;
 
   const screen = blessed.screen({
     smartCSR: true,
@@ -248,8 +341,9 @@ export async function runTui(config: AppConfig): Promise<void> {
     top: 0,
     left: 0,
     width: "100%",
-    height: 3,
+    height: 6,
     tags: true,
+    wrap: true,
     style: { fg: "white" },
   });
 
@@ -278,12 +372,13 @@ export async function runTui(config: AppConfig): Promise<void> {
     },
   });
 
-  const logBox = blessed.log({
-    parent: statusBox,
-    top: 3,
+  const flowLog = blessed.log({
+    parent: main,
+    top: 0,
     left: 0,
     width: "100%",
-    height: "100%-3",
+    height: "100%-1",
+    hidden: true,
     tags: false,
     scrollable: true,
     alwaysScroll: true,
@@ -292,12 +387,47 @@ export async function runTui(config: AppConfig): Promise<void> {
     mouse: true,
   });
 
+  const logBox = blessed.log({
+    parent: statusBox,
+    top: 6,
+    left: 0,
+    width: "100%",
+    height: "100%-6",
+    tags: false,
+    scrollable: true,
+    alwaysScroll: true,
+    keys: true,
+    vi: true,
+    mouse: true,
+  });
+
+  const runPrompt = blessed.prompt({
+    parent: screen,
+    top: "center",
+    left: "center",
+    width: "70%",
+    height: 9,
+    border: "line",
+    label: " Run now? ",
+    tags: true,
+    hidden: true,
+    keys: true,
+    vi: true,
+    style: { border: { fg: "magenta" } },
+  });
+
   const spinnerFrames = ["|", "/", "-", "\\"];
   let spinnerTimer: NodeJS.Timeout | undefined;
   let spinnerStartMs = 0;
   let spinnerPrefix = "";
+  let statusPrimary = "";
   let statusDetail = "";
+  let statusFlow = "";
   let spinnerIndex = 0;
+  let activeFuzz: ReturnType<typeof spawnStreaming> | null = null;
+  let quitAfterFuzzStops = false;
+  let inputLocked = false;
+  let inputUnlockTimer: NodeJS.Timeout | undefined;
 
   function stopSpinner(): void {
     if (spinnerTimer) {
@@ -306,35 +436,63 @@ export async function runTui(config: AppConfig): Promise<void> {
     }
   }
 
-  function renderStatus(primary: string): void {
-    const primaryLine = `{bold}${primary}{/bold}`;
-    const detailLine =
-      statusDetail.length > 0 ? `{gray-fg}${statusDetail}{/gray-fg}` : "";
-    statusLine.setContent(
-      detailLine.length > 0 ? `${primaryLine}\n${detailLine}` : primaryLine,
-    );
+  function formatStatusFlow(text: string): string {
+    const compact = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .join(" ");
+    if (compact.length === 0) {
+      return "";
+    }
+
+    const trimmed =
+      compact.length > statusFlowMaxChars
+        ? `...${compact.slice(-statusFlowMaxChars)}`
+        : compact;
+    return `Model flow: ${trimmed}`;
+  }
+
+  function renderStatus(): void {
+    const lines = [`{bold}${statusPrimary}{/bold}`];
+    if (statusDetail.length > 0) {
+      lines.push(`{gray-fg}${blessed.escape(statusDetail)}{/gray-fg}`);
+    }
+    if (statusFlow.length > 0) {
+      lines.push(`{gray-fg}${blessed.escape(statusFlow)}{/gray-fg}`);
+    }
+    statusLine.setContent(lines.join("\n"));
   }
 
   function setStatus(text: string, detail?: string): void {
     stopSpinner();
+    statusPrimary = text;
     statusDetail = detail ?? "";
-    renderStatus(text);
+    statusFlow = "";
+    renderStatus();
+    screen.render();
+  }
+
+  function setStatusFlow(text: string): void {
+    statusFlow = formatStatusFlow(text);
+    renderStatus();
     screen.render();
   }
 
   function startSpinner(prefix: string, detail?: string): void {
     stopSpinner();
     spinnerPrefix = prefix;
+    statusPrimary = prefix;
     statusDetail = detail ?? "";
+    statusFlow = "";
     spinnerStartMs = Date.now();
     spinnerIndex = 0;
 
     const tick = () => {
       const elapsedSeconds = Math.floor((Date.now() - spinnerStartMs) / 1000);
       const frame = spinnerFrames[spinnerIndex++ % spinnerFrames.length];
-      renderStatus(
-        `${spinnerPrefix} {cyan-fg}${frame}{/cyan-fg} {gray-fg}${elapsedSeconds}s{/gray-fg}`,
-      );
+      statusPrimary = `${spinnerPrefix} {cyan-fg}${frame}{/cyan-fg} {gray-fg}${elapsedSeconds}s{/gray-fg}`;
+      renderStatus();
       screen.render();
     };
 
@@ -342,8 +500,45 @@ export async function runTui(config: AppConfig): Promise<void> {
     tick();
   }
 
+  function setInputLocked(locked: boolean): void {
+    inputLocked = locked;
+    (list as any).interactive = !locked;
+  }
+
+  function clearInputUnlockTimer(): void {
+    if (inputUnlockTimer) {
+      clearTimeout(inputUnlockTimer);
+      inputUnlockTimer = undefined;
+    }
+  }
+
+  function lockInput(): void {
+    clearInputUnlockTimer();
+    setInputLocked(true);
+  }
+
+  function unlockInput(delayMs = 0): void {
+    clearInputUnlockTimer();
+    if (delayMs <= 0) {
+      setInputLocked(false);
+      redraw();
+      return;
+    }
+
+    inputUnlockTimer = setTimeout(() => {
+      inputUnlockTimer = undefined;
+      setInputLocked(false);
+      redraw();
+    }, delayMs);
+  }
+
   function pushLog(message: string): void {
     logBox.add(message);
+    screen.render();
+  }
+
+  function pushFlow(message: string): void {
+    flowLog.add(message);
     screen.render();
   }
 
@@ -481,6 +676,33 @@ export async function runTui(config: AppConfig): Promise<void> {
     }
 
     if (state.step === "result" && state.generated) {
+      const runLines: string[] = [];
+
+      if (state.runCommand) {
+        runLines.push("{bold}Last run{/bold}");
+        runLines.push("");
+        runLines.push(`Command: ${state.runCommand}`);
+        if (state.runLibAflOutputDir) {
+          runLines.push(`LibAFL output: ${state.runLibAflOutputDir}`);
+        }
+        if (state.runFindings && state.runFindings.length > 0) {
+          runLines.push("Findings:");
+          for (const finding of state.runFindings.slice(0, 8)) {
+            runLines.push(`- ${finding.kind}: ${finding.path}`);
+          }
+        }
+        if (state.runAutoJudge) {
+          runLines.push("");
+          runLines.push("{bold}Auto-judge{/bold}");
+          runLines.push("");
+          runLines.push(
+            `Verdict: ${state.runAutoJudge.verdict} (${state.runAutoJudge.root_cause})`,
+          );
+          runLines.push(state.runAutoJudge.reason);
+        }
+        runLines.push("");
+      }
+
       renderHarness(
         [
           `Campaign root: ${state.generated.rootDir}`,
@@ -489,9 +711,48 @@ export async function runTui(config: AppConfig): Promise<void> {
           `fuzz.bash: ${state.generated.fuzzScriptPath}`,
           `Harness: ${state.generated.harnessPath}`,
           "",
-          "The app did not auto-run the campaign. That is intentional.",
+          "Next: choose Run now to start fuzzing from the TUI.",
+          ...runLines,
         ].join("\n"),
       );
+      expandButton.hide();
+      return;
+    }
+
+    if (state.step === "run" && state.generated) {
+      const lines: string[] = [
+        `Campaign root: ${state.generated.rootDir}`,
+        "",
+        state.runCommand ? `Command: ${state.runCommand}` : "Command: (not set yet)",
+        state.fuzzRunning
+          ? "Status: running"
+          : "Status: stopped",
+      ];
+
+      if (state.runLibAflOutputDir) {
+        lines.push(`LibAFL output: ${state.runLibAflOutputDir}`);
+      }
+
+      if (state.runFindings && state.runFindings.length > 0) {
+        lines.push("");
+        lines.push("Findings:");
+        for (const finding of state.runFindings.slice(0, 10)) {
+          lines.push(`- ${finding.kind}: ${finding.path}`);
+        }
+      }
+
+      if (state.runAutoJudge) {
+        lines.push("");
+        lines.push("Auto-judge:");
+        lines.push(`- verdict: ${state.runAutoJudge.verdict}`);
+        lines.push(`- root cause: ${state.runAutoJudge.root_cause}`);
+        lines.push(`- reason: ${state.runAutoJudge.reason}`);
+        if (state.runAutoJudge.fixed_harness_source) {
+          lines.push("- harness fix: applied");
+        }
+      }
+
+      renderHarness(lines.join("\n"));
       expandButton.hide();
       return;
     }
@@ -502,6 +763,8 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   function redraw(): void {
     header.setContent(buildHeader(config, state));
+    list.show();
+    flowLog.hide();
 
     if (state.step === "mode") {
       renderChoices(list, modeChoices);
@@ -525,13 +788,23 @@ export async function runTui(config: AppConfig): Promise<void> {
     } else if (state.step === "result" && state.generated) {
       const actions: StepChoice[] = [
         {
+          key: "run",
+          label: "Run now",
+          description: "Run the gosentry campaign (asks cores first).",
+        },
+        {
           key: "done",
           label: "Done",
           description: "Exit the TUI",
         },
       ];
       renderChoices(list, actions);
-      setFooter("Enter or q: exit");
+      setFooter("Enter: action | q: quit");
+    } else if (state.step === "run") {
+      list.hide();
+      flowLog.show();
+      flowLog.focus();
+      setFooter("s: stop fuzzing | b: back | q: quit");
     }
 
     refreshHarnessPane();
@@ -564,10 +837,18 @@ export async function runTui(config: AppConfig): Promise<void> {
     pushLog("Ranking targets...");
 
     try {
-      const ranked = await rankTargetsWithOpenAI(config, state.discovery, prompts, {
-        fuzzMode: state.fuzzMode,
-        scopeMode: state.scopeMode,
-      });
+      const ranked = await rankTargetsWithOpenAI(
+        config,
+        state.discovery,
+        prompts,
+        {
+          fuzzMode: state.fuzzMode,
+          scopeMode: state.scopeMode,
+        },
+        {
+          onReasoningSummary: setStatusFlow,
+        },
+      );
       const chosen = ranked.recommendedIds
         .map((id) => state.discovery?.candidates.find((candidate) => candidate.id === id))
         .filter((candidate): candidate is CandidateTarget => candidate !== undefined);
@@ -614,6 +895,9 @@ export async function runTui(config: AppConfig): Promise<void> {
         target,
         state.fuzzMode,
         state.scopeMode,
+        {
+          onReasoningSummary: setStatusFlow,
+        },
       );
       plan = {
         ...plan,
@@ -648,7 +932,201 @@ export async function runTui(config: AppConfig): Promise<void> {
     redraw();
   }
 
+  function stopFuzzing(): void {
+    if (!activeFuzz) {
+      return;
+    }
+    try {
+      activeFuzz.child.kill("SIGINT");
+    } catch {
+      // ignore
+    }
+  }
+
+  function formatExitSummary(result: SpawnStreamingResult): string {
+    if (result.signal) {
+      return `signal=${result.signal}`;
+    }
+    if (typeof result.exitCode === "number") {
+      return `exit=${result.exitCode}`;
+    }
+    return "exit=unknown";
+  }
+
+  async function promptRunCores(): Promise<string | null> {
+    const suggested = Math.min(os.cpus().length, 4);
+    const defaultValue = state.runCores ?? String(Math.max(1, suggested));
+
+    return await new Promise((resolve) => {
+      runPrompt.input(
+        "Cores (number or list like 0,1,2,3):",
+        defaultValue,
+        (err, value) => {
+          if (err) {
+            resolve(null);
+            return;
+          }
+          resolve(value);
+        },
+      );
+    });
+  }
+
+  async function runNowFlow(): Promise<void> {
+    if (!state.generated || !state.plan) {
+      throw new Error("campaign is not generated yet");
+    }
+
+    if (state.generated.harnessPath.endsWith(".disabled")) {
+      setStatus("Harness not runnable yet", "This campaign needs manual harness wiring first.");
+      return;
+    }
+
+    const rawCores = await promptRunCores();
+    if (!rawCores) {
+      setStatus("Run cancelled");
+      return;
+    }
+
+    const cores = normalizeCoresInput(rawCores);
+    state.runCores = cores;
+    state.runCommand = `CORES=${cores} ./fuzz.bash`;
+    state.runLibAflOutputDir = undefined;
+    state.runFindings = undefined;
+    state.runAutoJudge = undefined;
+    state.step = "run";
+
+    flowLog.setContent("");
+    flowLog.setScroll(0);
+    pushFlow(`$ ${state.runCommand}`);
+
+    redraw();
+
+    const libAflPattern = /^libafl output dir:\s*(.+)$/i;
+    let autoRerunsRemaining = 1;
+    let attempt = 0;
+
+    while (true) {
+      attempt += 1;
+      const runStartedMs = Date.now();
+      const outputTail: string[] = [];
+      const tailLimit = 260;
+
+      state.fuzzRunning = true;
+      setStatus(attempt === 1 ? "Fuzzing" : "Re-running fuzzing", `cores=${cores}`);
+      redraw();
+
+      activeFuzz = spawnStreaming("./fuzz.bash", [], {
+        cwd: state.generated.rootDir,
+        env: {
+          ...process.env,
+          CORES: cores,
+          GOSENTRY_ROOT: config.gosentryPath,
+        },
+        onLine: (line) => {
+          outputTail.push(line);
+          if (outputTail.length > tailLimit) {
+            outputTail.shift();
+          }
+          pushFlow(line);
+
+          const match = line.match(libAflPattern);
+          if (match && match[1]) {
+            state.runLibAflOutputDir = match[1].trim();
+            refreshHarnessPane();
+            screen.render();
+          }
+        },
+      });
+
+      const result = await activeFuzz.completion;
+      activeFuzz = null;
+      state.fuzzRunning = false;
+
+      if (quitAfterFuzzStops) {
+        stopSpinner();
+        clearInputUnlockTimer();
+        screen.destroy();
+        return;
+      }
+
+      setStatus("Fuzzing stopped", formatExitSummary(result));
+
+      if (state.runLibAflOutputDir) {
+        state.runFindings = await collectFindings(state.runLibAflOutputDir, {
+          sinceMs: runStartedMs,
+        });
+      } else {
+        state.runFindings = [];
+      }
+
+      if (state.runFindings.length === 0) {
+        if (attempt === 1) {
+          setStatus("Fuzzing stopped", "No findings detected yet.");
+        } else {
+          pushFlow("");
+          pushFlow("Auto-rerun: no new findings detected.");
+        }
+        stopSpinner();
+        redraw();
+        return;
+      }
+
+      startSpinner("Auto-judging findings", `Model: ${config.model}/${config.reasoningEffort}`);
+      const harnessSource = await fs.readFile(state.generated.harnessPath, "utf8");
+      const judgeResult = await autoJudgeFindingWithOpenAI(
+        config,
+        prompts,
+        {
+          plan: state.plan,
+          campaignRoot: state.generated.rootDir,
+          harnessPath: state.generated.harnessPath,
+          harnessSource,
+          libAflOutputDir: state.runLibAflOutputDir,
+          findings: state.runFindings,
+          runOutputTail: outputTail.join("\n"),
+        },
+        {
+          onReasoningSummary: setStatusFlow,
+        },
+      );
+      state.runAutoJudge = judgeResult;
+
+      let appliedHarnessFix = false;
+      if (
+        judgeResult.verdict === "false_positive" &&
+        judgeResult.root_cause === "harness" &&
+        judgeResult.fixed_harness_source &&
+        judgeResult.fixed_harness_source.trim().length > 0
+      ) {
+        await fs.writeFile(state.generated.harnessPath, judgeResult.fixed_harness_source);
+        appliedHarnessFix = true;
+        pushFlow("");
+        pushFlow("Auto-judge: applied harness fix.");
+      }
+
+      stopSpinner();
+
+      if (appliedHarnessFix && autoRerunsRemaining > 0) {
+        autoRerunsRemaining -= 1;
+        pushFlow("");
+        pushFlow(`$ ${state.runCommand}  # auto-rerun after harness fix`);
+        continue;
+      }
+
+      redraw();
+      return;
+    }
+  }
+
   list.on("select", async (_item, index) => {
+    if (inputLocked) {
+      return;
+    }
+
+    lockInput();
+    let shouldUnlock = true;
+
     try {
       if (state.step === "mode") {
         const selected = choiceFromIndex(modeChoices, index);
@@ -686,16 +1164,37 @@ export async function runTui(config: AppConfig): Promise<void> {
         return;
       }
 
-      if (state.step === "result") {
+      if (state.step === "result" && state.generated) {
+        const actions: StepChoice[] = [
+          { key: "run", label: "Run now", description: "" },
+          { key: "done", label: "Done", description: "" },
+        ];
+        const selected = choiceFromIndex(actions, index);
+        if (!selected) {
+          return;
+        }
+        if (selected.key === "run") {
+          await runNowFlow();
+          return;
+        }
         stopSpinner();
+        clearInputUnlockTimer();
+        shouldUnlock = false;
         screen.destroy();
       }
     } catch (error) {
       pushLog(`Error: ${(error as Error).message}`);
+    } finally {
+      if (shouldUnlock) {
+        unlockInput(inputUnlockDelayMs);
+      }
     }
   });
 
   list.on("keypress", () => {
+    if (inputLocked) {
+      return;
+    }
     if (state.step === "target") {
       refreshHarnessPane();
       screen.render();
@@ -703,7 +1202,7 @@ export async function runTui(config: AppConfig): Promise<void> {
   });
 
   function toggleTargetDetails(): void {
-    if (state.step !== "target") {
+    if (inputLocked || state.step !== "target") {
       return;
     }
     state.targetDetailsExpanded = !state.targetDetailsExpanded;
@@ -714,8 +1213,39 @@ export async function runTui(config: AppConfig): Promise<void> {
   expandButton.on("click", toggleTargetDetails);
   screen.key(["+"], toggleTargetDetails);
 
+  screen.key(["s"], () => {
+    if (state.step !== "run") {
+      return;
+    }
+    if (!activeFuzz) {
+      return;
+    }
+    setStatus("Stopping fuzzing", "Sending SIGINT...");
+    stopFuzzing();
+  });
+
+  screen.key(["b"], () => {
+    if (state.step !== "run") {
+      return;
+    }
+    if (activeFuzz) {
+      return;
+    }
+    state.step = "result";
+    redraw();
+    list.focus();
+  });
+
   screen.key(["q", "C-c"], () => {
+    if (activeFuzz) {
+      quitAfterFuzzStops = true;
+      setStatus("Stopping fuzzing", "Sending SIGINT...");
+      stopFuzzing();
+      return;
+    }
+
     stopSpinner();
+    clearInputUnlockTimer();
     screen.destroy();
   });
 

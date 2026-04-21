@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 
 import {
+  buildAutoJudgePrompt,
   buildCampaignPlanPrompt,
   buildTargetRankingPrompt,
   type PromptSources,
@@ -15,6 +16,16 @@ import type {
   ScopeMode,
 } from "./types.js";
 
+interface ModelProgressCallbacks {
+  onReasoningSummary?: (summary: string) => void;
+}
+
+export interface AutoJudgeResult {
+  verdict: "real_bug" | "false_positive" | "unclear";
+  root_cause: "target" | "harness" | "environment" | "unknown";
+  reason: string;
+  fixed_harness_source?: string;
+}
 function createClient(config: AppConfig): OpenAI {
   return new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
@@ -24,6 +35,47 @@ function createClient(config: AppConfig): OpenAI {
 
 function parseJsonObject<T>(text: string): T {
   return JSON.parse(text) as T;
+}
+
+async function createJsonResponse<T>(
+  config: AppConfig,
+  input: string,
+  callbacks?: ModelProgressCallbacks,
+): Promise<T> {
+  const client = createClient(config);
+  const stream = client.responses.stream({
+    model: config.model,
+    reasoning: {
+      effort: config.reasoningEffort,
+      summary: "auto",
+    },
+    instructions:
+      "Return valid JSON. The word JSON is present on purpose. Do not add markdown fences.",
+    input,
+    text: {
+      format: {
+        type: "json_object",
+      },
+    },
+  });
+
+  let reasoningSummary = "";
+
+  for await (const event of stream) {
+    if (event.type === "response.reasoning_summary_text.delta") {
+      reasoningSummary += event.delta;
+      callbacks?.onReasoningSummary?.(reasoningSummary);
+      continue;
+    }
+
+    if (event.type === "response.reasoning_summary_text.done") {
+      reasoningSummary = event.text;
+      callbacks?.onReasoningSummary?.(reasoningSummary);
+    }
+  }
+
+  const response = await stream.finalResponse();
+  return parseJsonObject<T>(response.output_text);
 }
 
 function summarizeCandidates(candidates: CandidateTarget[]): string {
@@ -66,8 +118,8 @@ export async function rankTargetsWithOpenAI(
   discovery: DiscoveryResult,
   prompts: PromptSources,
   context?: { fuzzMode?: FuzzMode; scopeMode?: ScopeMode },
+  callbacks?: ModelProgressCallbacks,
 ): Promise<RankedTargetResult> {
-  const client = createClient(config);
   const input = buildTargetRankingPrompt({
     targetDir: config.targetDir,
     fuzzMode: context?.fuzzMode,
@@ -76,23 +128,10 @@ export async function rankTargetsWithOpenAI(
     sourcePromptText: prompts.combinedText,
   });
 
-  const response = await client.responses.create({
-    model: config.model,
-    reasoning: { effort: config.reasoningEffort },
-    instructions:
-      "Return valid JSON. The word JSON is present on purpose. Do not add markdown fences.",
-    input,
-    text: {
-      format: {
-        type: "json_object",
-      },
-    },
-  });
-
-  const payload = parseJsonObject<{
+  const payload = await createJsonResponse<{
     recommended_ids?: string[];
     notes?: string[];
-  }>(response.output_text);
+  }>(config, input, callbacks);
 
   return {
     recommendedIds: payload.recommended_ids ?? [],
@@ -106,8 +145,8 @@ export async function buildCampaignPlanWithOpenAI(
   target: CandidateTarget,
   fuzzMode: FuzzMode,
   scopeMode: ScopeMode,
+  callbacks?: ModelProgressCallbacks,
 ): Promise<Omit<CampaignPlan, "slug" | "fuzzMode" | "scopeMode" | "target">> {
-  const client = createClient(config);
   const input = buildCampaignPlanPrompt({
     targetDir: config.targetDir,
     fuzzMode,
@@ -116,20 +155,7 @@ export async function buildCampaignPlanWithOpenAI(
     sourcePromptText: prompts.combinedText,
   });
 
-  const response = await client.responses.create({
-    model: config.model,
-    reasoning: { effort: config.reasoningEffort },
-    instructions:
-      "Return valid JSON. The word JSON is present on purpose. Do not add markdown fences.",
-    input,
-    text: {
-      format: {
-        type: "json_object",
-      },
-    },
-  });
-
-  const payload = parseJsonObject<{
+  const payload = await createJsonResponse<{
     title?: string;
     oracle_strategy?: string;
     harness_strategy?: string;
@@ -137,7 +163,7 @@ export async function buildCampaignPlanWithOpenAI(
     corpus_ideas?: string[];
     panic_on_candidates?: string[];
     report_expectations?: string[];
-  }>(response.output_text);
+  }>(config, input, callbacks);
 
   return {
     title:
@@ -164,5 +190,53 @@ export async function buildCampaignPlanWithOpenAI(
         "save real findings in FOUND_ISSUES.md",
         "save campaign notes in FUZZ.md",
       ],
+  };
+}
+
+export async function autoJudgeFindingWithOpenAI(
+  config: AppConfig,
+  prompts: PromptSources,
+  input: {
+    plan: CampaignPlan;
+    campaignRoot: string;
+    harnessPath: string;
+    harnessSource: string;
+    libAflOutputDir?: string;
+    findings: Array<{ kind: string; path: string }>;
+    runOutputTail: string;
+  },
+  callbacks?: ModelProgressCallbacks,
+): Promise<AutoJudgeResult> {
+  const findingsSummary =
+    input.findings.length > 0
+      ? input.findings.map((finding) => `- ${finding.kind}: ${finding.path}`).join("\n")
+      : "- none";
+
+  const prompt = buildAutoJudgePrompt({
+    targetDir: config.targetDir,
+    campaignRoot: input.campaignRoot,
+    fuzzMode: input.plan.fuzzMode,
+    scopeMode: input.plan.scopeMode,
+    selectedTargetSummary: summarizeTarget(input.plan.target),
+    harnessPath: input.harnessPath,
+    harnessSource: input.harnessSource,
+    libAflOutputDir: input.libAflOutputDir,
+    findingsSummary,
+    runOutputTail: input.runOutputTail,
+    sourcePromptText: prompts.combinedText,
+  });
+
+  const payload = await createJsonResponse<{
+    verdict?: AutoJudgeResult["verdict"];
+    root_cause?: AutoJudgeResult["root_cause"];
+    reason?: string;
+    fixed_harness_source?: string;
+  }>(config, prompt, callbacks);
+
+  return {
+    verdict: payload.verdict ?? "unclear",
+    root_cause: payload.root_cause ?? "unknown",
+    reason: payload.reason ?? "No reason returned by model.",
+    fixed_harness_source: payload.fixed_harness_source,
   };
 }
