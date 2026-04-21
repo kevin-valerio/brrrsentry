@@ -27,7 +27,11 @@ export interface CandidateTarget {
   isExported?: boolean;
   acceptsBytes?: boolean;
   acceptsString?: boolean;
+  acceptsContext?: boolean;
   argCount?: number;
+  contextArgIndex?: number;
+  fuzzInputArgIndex?: number;
+  fuzzInputKind?: "bytes" | "string";
 }
 
 export interface RepositoryDiscoveryFile {

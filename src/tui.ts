@@ -3,12 +3,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { writeCampaign, createFallbackPlan } from "./campaign.js";
+import { canAutoWireGoHarness, createFallbackPlan, writeCampaign } from "./campaign.js";
 import { buildRepositoryDiscoveryContext } from "./discovery.js";
 import {
   autoJudgeFindingWithOpenAI,
   buildCampaignPlanWithOpenAI,
   discoverTargetsWithOpenAI,
+  draftGoHarnessWithOpenAI,
+  repairGoHarnessWithOpenAI,
 } from "./openai.js";
 import { loadPromptSources } from "./prompts.js";
 import { FUZZING_GUIDELINES } from "./guidelines.js";
@@ -46,6 +48,7 @@ interface AppState {
   selectedTarget?: CandidateTarget;
   targetDetailsExpanded?: boolean;
   plan?: CampaignPlan;
+  draftedHarnessSource?: string;
   generated?: GeneratedCampaign;
   runCores?: string;
   runCommand?: string;
@@ -142,18 +145,6 @@ function renderChoices(list: blessed.Widgets.ListElement, choices: StepChoice[])
   list.select(0);
 }
 
-function canAutoWireGoHarness(candidate: CandidateTarget): boolean {
-  return (
-    candidate.language === "go" &&
-    !candidate.hasReceiver &&
-    Boolean(candidate.importPath) &&
-    Boolean(candidate.packageName) &&
-    Boolean(candidate.isExported) &&
-    candidate.argCount === 1 &&
-    Boolean(candidate.acceptsBytes || candidate.acceptsString)
-  );
-}
-
 function renderTargets(
   list: blessed.Widgets.ListElement,
   candidates: CandidateTarget[],
@@ -163,8 +154,7 @@ function renderTargets(
   list.setItems(
     candidates.map(
       (candidate) => {
-        const harnessTag = canAutoWireGoHarness(candidate) ? "AUTO" : "MANUAL";
-        return `[${harnessTag}] ${candidate.symbol} [${candidate.language}] score=${candidate.score} ${candidate.relativePath}`;
+        return `[AUTO] ${candidate.symbol} [${candidate.language}] score=${candidate.score} ${candidate.relativePath}`;
       },
     ),
   );
@@ -630,23 +620,14 @@ export async function runTui(config: AppConfig): Promise<void> {
   function describeHarness(
     candidate: CandidateTarget,
   ): { short: string; long: string } {
-    const runnable = canAutoWireGoHarness(candidate);
-    const harnessBadge = runnable
-      ? "{bold}{green-fg}AUTO{/green-fg}{/bold}"
-      : "{bold}{yellow-fg}MANUAL{/yellow-fg}{/bold}";
+    const fastPath = canAutoWireGoHarness(candidate);
+    const harnessBadge = "{bold}{green-fg}AUTO{/green-fg}{/bold}";
     const languageBadge = formatLanguageBadge(candidate.language);
-    const inputType = candidate.acceptsBytes
-      ? "[]byte"
-      : candidate.acceptsString
-        ? "string"
-        : "unknown";
 
     const shortLines = [
       `{bold}Target{/bold}: {bold}${candidate.symbol}{/bold} [${languageBadge}]`,
-      `{bold}Harness{/bold}: ${harnessBadge} {gray-fg}${runnable ? "in-process Go harness" : "manual template"}{/gray-fg}`,
-      runnable
-        ? `{bold}Would do{/bold}: fuzz ${candidate.symbol}(${inputType}) in-process; optional differential vs BRRRSENTRY_ORACLE_BIN.`
-        : "{bold}Would do{/bold}: generate campaign + notes; you hand-wire the real harness for this target.",
+      `{bold}Harness{/bold}: ${harnessBadge} {gray-fg}${fastPath ? "simple signature" : "complex signature"}{/gray-fg}`,
+      "{bold}Would do{/bold}: auto-generate a runnable harness and run gosentry.",
       "{gray-fg}Tip: press + (or click [+]) for details.{/gray-fg}",
     ];
 
@@ -657,9 +638,12 @@ export async function runTui(config: AppConfig): Promise<void> {
       "",
       "{bold}Harness wiring{/bold}",
       "",
-      "{bold}AUTO{/bold}: brrrsentry can generate a runnable harness and you can run fuzzing right away.",
-      "{bold}AUTO{/bold} works best for a simple Go function: public, not a method, 1 arg ([]byte or string).",
-      "{bold}MANUAL{/bold}: brrrsentry generates a template and notes. You must wire the harness to call the target (Run now will be blocked until then).",
+      "{bold}AUTO{/bold}: brrrsentry always generates a runnable harness.",
+      "{bold}AUTO{/bold}: it will compile-check the harness before continuing.",
+      "{bold}AUTO{/bold}: if the harness cannot be made to compile, brrrsentry will switch to the next target and tell you.",
+      "",
+      "{bold}Fast path{/bold}: exported package-level Go func with []byte/string input (and optional context.Context).",
+      "{bold}Complex path{/bold}: brrrsentry asks the model to generate harness code + fixes it using compiler errors.",
       "",
       `{bold}Path{/bold}: ${candidate.relativePath}`,
       `{bold}Signature{/bold}: ${candidate.signature}`,
@@ -964,7 +948,146 @@ export async function runTui(config: AppConfig): Promise<void> {
     redraw();
   }
 
-  async function buildPlanFlow(target: CandidateTarget): Promise<void> {
+  function escapeRegExp(input: string): string {
+    return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  async function readTargetSnippet(candidate: CandidateTarget): Promise<string> {
+    try {
+      const raw = await fs.readFile(candidate.filePath, "utf8");
+      const normalized = raw.replace(/\r/g, "");
+      const lines = normalized.split("\n");
+      const head = lines.slice(0, 120).join("\n").slice(0, 5200).trimEnd();
+
+      const symbol = candidate.symbol.trim();
+      const matcher = new RegExp(
+        `func\\s+(?:\\([^)]*\\)\\s*)?${escapeRegExp(symbol)}\\s*\\(`,
+        "m",
+      );
+      const match = matcher.exec(normalized);
+      if (!match || typeof match.index !== "number") {
+        return `FILE HEAD:\n${head}`;
+      }
+
+      const start = Math.max(0, match.index - 1400);
+      const end = Math.min(normalized.length, match.index + 3600);
+      const around = normalized
+        .slice(start, end)
+        .split("\n")
+        .slice(0, 200)
+        .join("\n")
+        .slice(0, 7200)
+        .trimEnd();
+
+      return [`FILE HEAD:\n${head}`, "", `AROUND ${symbol}:\n${around}`]
+        .filter((part) => part.trim().length > 0)
+        .join("\n");
+    } catch {
+      return "";
+    }
+  }
+
+  async function compileGoHarness(params: {
+    moduleName: string;
+    moduleRoot: string;
+    harnessSource: string;
+  }): Promise<{ ok: boolean; output: string }> {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "brrrsentry-harness-"));
+
+    try {
+      const goMod = [
+        "module brrrsentry/harnesscheck",
+        "",
+        "go 1.23",
+        "",
+        `require ${params.moduleName} v0.0.0`,
+        `replace ${params.moduleName} => ${params.moduleRoot}`,
+        "",
+      ].join("\n");
+
+      await fs.writeFile(path.join(tempDir, "go.mod"), goMod);
+      await fs.writeFile(path.join(tempDir, "harness_test.go"), params.harnessSource);
+
+      const outputLines: string[] = [];
+      const run = spawnStreaming("go", ["test", "-c"], {
+        cwd: tempDir,
+        env: process.env,
+        onLine: (line) => outputLines.push(line),
+      });
+      const result = await run.completion;
+      const output = outputLines.slice(-220).join("\n");
+
+      return {
+        ok: result.exitCode === 0,
+        output,
+      };
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  async function draftRunnableHarness(plan: CampaignPlan): Promise<string> {
+    const moduleName = state.discovery?.moduleName;
+    const moduleRoot = state.discovery?.moduleRoot;
+    const snippet = await readTargetSnippet(plan.target);
+
+    if (!moduleName || !moduleRoot) {
+      throw new Error("missing go.mod module info for harness compilation");
+    }
+    if (!plan.target.importPath) {
+      throw new Error("missing Go import path for selected target");
+    }
+
+    setStatusFlow("drafting harness JSON");
+    let { harnessSource } = await draftGoHarnessWithOpenAI(
+      config,
+      prompts,
+      { plan, targetFileSnippet: snippet },
+      undefined,
+    );
+
+    if (!harnessSource) {
+      throw new Error("model returned an empty harness_source");
+    }
+
+    const maxFixAttempts = 3;
+    for (let attempt = 0; attempt < maxFixAttempts; attempt += 1) {
+      setStatusFlow("compiling harness");
+      const compilation = await compileGoHarness({
+        moduleName,
+        moduleRoot,
+        harnessSource,
+      });
+      if (compilation.ok) {
+        return harnessSource;
+      }
+
+      if (attempt >= maxFixAttempts - 1) {
+        throw new Error(`harness did not compile after ${maxFixAttempts} attempts\n${compilation.output}`);
+      }
+
+      setStatusFlow("fixing harness compile error");
+      const repaired = await repairGoHarnessWithOpenAI(
+        config,
+        prompts,
+        {
+          plan,
+          targetFileSnippet: snippet,
+          harnessSource,
+          buildError: compilation.output,
+        },
+        undefined,
+      );
+      if (!repaired.harnessSource) {
+        throw new Error("model returned an empty repaired harness_source");
+      }
+      harnessSource = repaired.harnessSource;
+    }
+
+    return harnessSource;
+  }
+
+  async function buildPlanFlow(target: CandidateTarget): Promise<boolean> {
     if (!state.fuzzMode || !state.scopeMode) {
       throw new Error("wizard state is incomplete");
     }
@@ -977,12 +1100,23 @@ export async function runTui(config: AppConfig): Promise<void> {
     pushLog(`${planningMode} for ${target.symbol}...`);
     startModelProgress([
       "analyzing selected target",
-      "drafting harness strategy",
+      "drafting harness code",
+      "compiling harness",
       "drafting campaign plan",
       "validating plan JSON",
     ]);
 
     let plan = createFallbackPlan(target, state.fuzzMode, state.scopeMode);
+
+    try {
+      state.draftedHarnessSource = await draftRunnableHarness(plan);
+    } catch (error) {
+      state.draftedHarnessSource = undefined;
+      stopModelProgress();
+      setStatus("Harness generation failed", (error as Error).message);
+      pushLog(`Harness generation failed for ${target.symbol}.`);
+      return false;
+    }
 
     try {
       const enriched = await buildCampaignPlanWithOpenAI(
@@ -1000,8 +1134,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       };
       pushLog(`Plan: ${plan.title}`);
     } catch (error) {
-      setStatus("Plan drafting failed", (error as Error).message);
-      throw error;
+      pushLog(`Plan: using fallback (model failed: ${(error as Error).message})`);
     } finally {
       stopModelProgress();
     }
@@ -1010,6 +1143,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     state.step = "review";
     setStatus("Review campaign plan", plan.title);
     redraw();
+    return true;
   }
 
   async function generateFlow(): Promise<void> {
@@ -1022,7 +1156,11 @@ export async function runTui(config: AppConfig): Promise<void> {
     state.generated = await writeCampaign(
       config,
       state.plan,
-      state.discovery?.moduleName,
+      {
+        moduleName: state.discovery?.moduleName,
+        moduleRoot: state.discovery?.moduleRoot,
+      },
+      state.draftedHarnessSource,
     );
     state.step = "result";
     setStatus("Campaign generated", `.brrrsentry/campaigns/${state.plan.slug}`);
@@ -1072,11 +1210,6 @@ export async function runTui(config: AppConfig): Promise<void> {
   async function runNowFlow(): Promise<void> {
     if (!state.generated || !state.plan) {
       throw new Error("campaign is not generated yet");
-    }
-
-    if (state.generated.harnessPath.endsWith(".disabled")) {
-      setStatus("Harness not runnable yet", "This campaign needs manual harness wiring first.");
-      return;
     }
 
     const rawCores = await promptRunCores();
@@ -1266,8 +1399,37 @@ export async function runTui(config: AppConfig): Promise<void> {
         if (!selected) {
           return;
         }
-        state.selectedTarget = selected;
-        await buildPlanFlow(selected);
+        const candidatesToTry = [
+          selected,
+          ...state.discovery.candidates.filter((candidate) => candidate.id !== selected.id),
+        ];
+
+        let previousTarget = selected;
+        for (const [candidateIndex, candidate] of candidatesToTry.entries()) {
+          if (candidateIndex > 0) {
+            pushLog(
+              `Auto-switching target: ${previousTarget.symbol} failed to generate a runnable harness. Trying ${candidate.symbol}...`,
+            );
+          }
+
+          state.selectedTarget = candidate;
+          const ok = await buildPlanFlow(candidate);
+          if (ok) {
+            if (candidate.id !== selected.id) {
+              pushLog(`Selected target is now: ${candidate.symbol} (${candidate.relativePath})`);
+            }
+            return;
+          }
+
+          previousTarget = candidate;
+        }
+
+        state.selectedTarget = undefined;
+        state.plan = undefined;
+        state.draftedHarnessSource = undefined;
+        state.step = "target";
+        setStatus("No runnable targets", "All discovered targets failed harness generation.");
+        redraw();
         return;
       }
 

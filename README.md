@@ -29,14 +29,15 @@ Target discovery is agentic now. `brrrsentry` builds a local file inventory and
 source preview set, then asks the model to pick concrete fuzz targets from that
 repo context.
 
-This is not limited to Go, Rust, or C/C++. The model can discover targets from
-whatever languages are present in the target repo, as long as the local preview
-step can read the files as text.
+Today `brrrsentry` only runs Go targets. It prefers targets that are easy to
+auto-wire (exported package-level functions with `[]byte|string`, optionally
+paired with `context.Context`), but it can also handle more complex Go targets.
 
-Go targets get the best support. If the selected Go target is a simple exported
-package-level function that takes one `[]byte` or `string`, `brrrsentry` writes
-a runnable harness. Otherwise it writes a disabled harness template plus notes
-for manual follow-up.
+For complex targets, `brrrsentry` asks the model to draft harness code and then
+compile-checks it. If the harness does not compile, `brrrsentry` feeds the
+compiler error back to the model to repair the harness. If a target still
+cannot be made runnable, `brrrsentry` auto-switches to the next best target and
+prints that decision in the Status log so the TUI never gets stuck.
 
 ## Generated workspace
 
@@ -47,7 +48,7 @@ for manual follow-up.
 | `.brrrsentry/campaigns/<slug>/FOUND_ISSUES.md` | Place to record real findings |
 | `.brrrsentry/campaigns/<slug>/fuzz.bash` | gosentry run wrapper |
 | `.brrrsentry/campaigns/<slug>/libafl.config.jsonc` | LibAFL config used by the run wrapper |
-| `.brrrsentry/campaigns/<slug>/harness/` | Generated Go harness or disabled template |
+| `.brrrsentry/campaigns/<slug>/harness/` | Generated Go harness |
 | `.brrrsentry/campaigns/<slug>/grammar/grammar.json` | Grammar file for grammar mode |
 | `.brrrsentry/campaigns/<slug>/corpus/` | Initial corpus notes |
 | `.brrrsentry/campaigns/<slug>/reports/` | Place for replay and coverage output |
@@ -63,6 +64,7 @@ npm run dev -- /path/to/target-repo
 Or run the built CLI:
 
 ```bash
+npm run build
 node dist/index.js /path/to/target-repo
 ```
 
@@ -77,7 +79,7 @@ node dist/index.js /path/to/target-repo
 ## Model calls
 
 `OPENAI_API_KEY` is required. `brrrsentry` calls the model API to discover
-targets and draft the campaign plan.
+targets, draft/repair the Go harness, and draft the campaign plan.
 
 Requests are sent with `store: false`, so they are not saved in the OpenAI
 dashboard logs.
@@ -102,3 +104,7 @@ If you keep local fuzzing prompt material, place it in `prompts/1.md`,
 `brrrsentry` uses that material only as extra source context for model-backed
 discovery and planning. Core campaign rules still come from
 `src/guidelines.ts`.
+
+Those core rules include things like: gosentry is required, use Go vs Go (or
+Go vs X) harnesses, pick a clear oracle/source-of-truth for differential checks,
+use tests/specs to stay realistic, and avoid admin-only/key-compromise targets.

@@ -210,21 +210,35 @@ function parseGoMetadata(
 
   const receiver = matcher[1];
   const args = matcher[2] ?? "";
-  const argCount =
+  const parts =
     args.trim() === ""
-      ? 0
+      ? []
       : args
           .split(",")
           .map((part) => part.trim())
-          .filter(Boolean).length;
+          .filter(Boolean);
+  const argCount = parts.length;
+  const typeTokens = parts.map((part) => part.split(/\s+/).filter(Boolean).at(-1));
+  const bytesArgIndex = typeTokens.findIndex((token) => token === "[]byte");
+  const stringArgIndex = typeTokens.findIndex((token) => token === "string");
+  const contextArgIndex = typeTokens.findIndex((token) => token === "context.Context");
+  const acceptsBytes = bytesArgIndex >= 0;
+  const acceptsString = stringArgIndex >= 0;
+  const acceptsContext = contextArgIndex >= 0;
+  const fuzzInputArgIndex = bytesArgIndex >= 0 ? bytesArgIndex : stringArgIndex >= 0 ? stringArgIndex : undefined;
+  const fuzzInputKind = bytesArgIndex >= 0 ? "bytes" : stringArgIndex >= 0 ? "string" : undefined;
 
   return {
     signature: matcher[0].replace(/\s+/g, " ").trim(),
     hasReceiver: Boolean(receiver),
     isExported: /^[A-Z]/.test(symbol),
-    acceptsBytes: /\[\]byte/.test(args),
-    acceptsString: /\bstring\b/.test(args),
+    acceptsBytes,
+    acceptsString,
+    acceptsContext,
     argCount,
+    contextArgIndex: contextArgIndex >= 0 ? contextArgIndex : undefined,
+    fuzzInputArgIndex,
+    fuzzInputKind,
   };
 }
 
@@ -275,7 +289,7 @@ async function enrichGoCandidate(
     const content = await fs.readFile(candidate.filePath, "utf8");
     parsedMetadata = parseGoMetadata(content, candidate.symbol);
   } catch {
-    // keep the candidate as manual-only if local parsing fails
+    // keep the candidate as non-runnable if local parsing fails
   }
 
   return {
@@ -452,16 +466,23 @@ export async function hydrateDiscoveredTargets(
     uniqueCandidates.push(candidate);
   }
 
-  const candidates = uniqueCandidates.slice(0, 12);
+  const goCandidates = uniqueCandidates
+    .filter((candidate) => candidate.language === "go")
+    .sort((left, right) => right.score - left.score);
+  const candidates = goCandidates.slice(0, 12);
   const notes = [...context.notes];
 
-  if (candidates.length === 0) {
-    notes.push("No fuzz candidates were returned by the agentic discovery step.");
+  if (uniqueCandidates.length > 0 && goCandidates.length === 0) {
+    notes.push("Only Go fuzz targets are supported right now.");
   }
 
-  if (candidates.some((candidate) => candidate.language === "go") && !context.moduleName) {
+  if (candidates.length === 0) {
+    notes.push("No Go fuzz targets were returned by the agentic discovery step.");
+  }
+
+  if (uniqueCandidates.some((candidate) => candidate.language === "go") && !context.moduleName) {
     notes.push(
-      "No Go module root was found above the target directory. Auto-wired Go harnesses may be unavailable.",
+      "No Go module root was found above the target directory. Auto-generated harnesses need a go.mod module.",
     );
   }
 

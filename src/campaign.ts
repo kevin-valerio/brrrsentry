@@ -45,7 +45,7 @@ export function createFallbackPlan(
     harnessStrategy:
       canAutoWireGoHarness(target)
         ? "Generate a package-level Go harness for the selected function."
-        : "Generate a manual harness template and campaign notes because the entrypoint is not simple enough to auto-wire safely.",
+        : "Auto-generate a Go harness for the selected target, then compile-check and auto-fix it. If it still fails, switch to the next target.",
     grammarSummary:
       fuzzMode === "grammar"
         ? "Generate a grammar that matches the real input language of the target."
@@ -65,45 +65,81 @@ export function createFallbackPlan(
   };
 }
 
-function canAutoWireGoHarness(target: CandidateTarget): boolean {
+export function canAutoWireGoHarness(target: CandidateTarget): boolean {
+  const fuzzInputIndex = target.fuzzInputArgIndex;
+  const fuzzInputKind = target.fuzzInputKind;
+  const contextIndex = target.contextArgIndex;
+
   return (
     target.language === "go" &&
-    !target.hasReceiver &&
+    target.hasReceiver === false &&
     Boolean(target.importPath) &&
     Boolean(target.packageName) &&
-    Boolean(target.isExported) &&
-    target.argCount === 1 &&
-    Boolean(target.acceptsBytes || target.acceptsString)
+    target.isExported === true &&
+    (fuzzInputKind === "bytes" || fuzzInputKind === "string") &&
+    typeof fuzzInputIndex === "number" &&
+    (target.argCount === 1
+      ? fuzzInputIndex === 0
+      : target.argCount === 2
+        ? typeof contextIndex === "number" &&
+          (contextIndex === 0 || contextIndex === 1) &&
+          (fuzzInputIndex === 0 || fuzzInputIndex === 1) &&
+          contextIndex !== fuzzInputIndex
+        : false)
   );
 }
 
-function buildGoMod(plan: CampaignPlan, moduleName?: string): string {
-  if (!moduleName) {
+function normalizeGoModPath(inputPath: string): string {
+  return inputPath.replace(/\\/g, "/");
+}
+
+function buildGoMod(params: {
+  plan: CampaignPlan;
+  moduleName?: string;
+  moduleRoot?: string;
+  harnessDir: string;
+}): string {
+  if (!params.moduleName || !params.moduleRoot) {
     return "module brrrsentry/generated\n\ngo 1.23\n";
   }
 
+  const relativeReplace = normalizeGoModPath(
+    path.relative(params.harnessDir, params.moduleRoot) || ".",
+  );
+
   return [
-    `module brrrsentry/${plan.slug}`,
+    `module brrrsentry/${params.plan.slug}`,
     "",
     "go 1.23",
     "",
-    `require ${moduleName} v0.0.0`,
-    `replace ${moduleName} => ../../../..`,
+    `require ${params.moduleName} v0.0.0`,
+    `replace ${params.moduleName} => ${relativeReplace}`,
     "",
   ].join("\n");
 }
 
 function buildReadyGoHarness(plan: CampaignPlan): string {
   const target = plan.target;
-  const inputExpr = target.acceptsBytes ? "data" : "string(data)";
-  const targetInputType = target.acceptsBytes ? "[]byte" : "string";
+  if (!canAutoWireGoHarness(target)) {
+    throw new Error(`Target cannot be auto-wired into a Go harness: ${target.symbol}`);
+  }
+
+  const inputExpr = target.fuzzInputKind === "bytes" ? "data" : "string(data)";
   const functionName = `Fuzz${toPascalCase(plan.slug)}`;
+  const needsContext = target.argCount === 2;
+  const args =
+    needsContext && target.contextArgIndex === 0
+      ? `context.Background(), ${inputExpr}`
+      : needsContext
+        ? `${inputExpr}, context.Background()`
+        : inputExpr;
 
   return [
     "package fuzzcampaign",
     "",
     "import (",
     '  "bytes"',
+    ...(needsContext ? ['  "context"'] : []),
     '  "os"',
     '  "os/exec"',
     '  "reflect"',
@@ -117,7 +153,7 @@ function buildReadyGoHarness(plan: CampaignPlan): string {
     '  f.Add([]byte("[]"))',
     "",
     "  f.Fuzz(func(t *testing.T, data []byte) {",
-    `    accepted, valueText := callTarget(targetpkg.${target.symbol}, ${inputExpr})`,
+    `    accepted, valueText := callTarget(targetpkg.${target.symbol}, ${args})`,
     "    oracleAccepted, oracleOutput := runOracleCLI(t, data)",
     "",
     '    if oracleConfigured() && accepted != oracleAccepted {',
@@ -130,8 +166,12 @@ function buildReadyGoHarness(plan: CampaignPlan): string {
     "  })",
     "}",
     "",
-    `func callTarget(fn any, input ${targetInputType}) (bool, string) {`,
-    "  results := reflect.ValueOf(fn).Call([]reflect.Value{reflect.ValueOf(input)})",
+    "func callTarget(fn any, args ...any) (bool, string) {",
+    "  values := make([]reflect.Value, 0, len(args))",
+    "  for _, arg := range args {",
+    "    values = append(values, reflect.ValueOf(arg))",
+    "  }",
+    "  results := reflect.ValueOf(fn).Call(values)",
     "  accepted := true",
     '  valueText := ""',
     "",
@@ -170,27 +210,6 @@ function buildReadyGoHarness(plan: CampaignPlan): string {
     "func oracleConfigured() bool {",
     '  return os.Getenv("BRRRSENTRY_ORACLE_BIN") != ""',
     "}",
-    "",
-  ].join("\n");
-}
-
-function buildManualHarness(plan: CampaignPlan): string {
-  return [
-    "This target was not auto-wired into a runnable Go harness.",
-    "",
-    `Target: ${plan.target.symbol}`,
-    `Path: ${plan.target.relativePath}`,
-    `Signature: ${plan.target.signature}`,
-    "",
-    "Why manual follow-up is needed",
-    "",
-    "- the selected entrypoint is not a simple exported package-level function with one `[]byte` or `string` input",
-    "- or the package import path could not be inferred safely",
-    "",
-    "Suggested next step",
-    "",
-    "- move this target into a hand-written harness",
-    "- keep the campaign workspace here for grammar, corpus, reporting, and run scripts",
     "",
   ].join("\n");
 }
@@ -295,7 +314,7 @@ function buildLibAflConfig(): string {
 function buildFuzzScript(
   config: AppConfig,
   plan: CampaignPlan,
-  generated: { harnessFileName: string; runnable: boolean },
+  harnessFileName: string,
 ): string {
   const fuzzTarget = `Fuzz${toPascalCase(plan.slug)}`;
   const grammarFlag =
@@ -320,15 +339,11 @@ function buildFuzzScript(
     "  exit 1",
     "fi",
     "",
-    `if [[ ! -f "$HARNESS_DIR/${generated.harnessFileName}" ]]; then`,
+    `if [[ ! -f "$HARNESS_DIR/${harnessFileName}" ]]; then`,
     '  echo "Runnable harness file is missing."',
     '  echo "Read FUZZ.md and the harness notes first."',
     "  exit 1",
     "fi",
-    "",
-    generated.runnable
-      ? ""
-      : 'echo "This campaign only has a manual harness template right now. Read FUZZ.md first."\nexit 1',
     "",
     'TEMP_LIBAFL_CONFIG="$(mktemp)"',
     'trap \'rm -f "$TEMP_LIBAFL_CONFIG"\' EXIT',
@@ -352,7 +367,8 @@ function buildFuzzScript(
 export async function writeCampaign(
   config: AppConfig,
   plan: CampaignPlan,
-  moduleName?: string,
+  module?: { moduleName?: string; moduleRoot?: string },
+  harnessSource?: string,
 ): Promise<GeneratedCampaign> {
   const campaignRoot = path.join(
     config.targetDir,
@@ -370,19 +386,24 @@ export async function writeCampaign(
   await fs.mkdir(grammarDir, { recursive: true });
   await fs.mkdir(reportsDir, { recursive: true });
 
-  const harnessFileName = canAutoWireGoHarness(plan.target)
-    ? `${toPascalCase(plan.slug)}_test.go`
-    : `${toPascalCase(plan.slug)}_test.go.disabled`;
-  const runnableHarness = canAutoWireGoHarness(plan.target);
+  const harnessFileName = `${toPascalCase(plan.slug)}_test.go`;
   const harnessPath = path.join(harnessDir, harnessFileName);
+  const resolvedHarnessSource =
+    harnessSource ?? (canAutoWireGoHarness(plan.target) ? buildReadyGoHarness(plan) : null);
+  if (!resolvedHarnessSource) {
+    throw new Error(`Harness source is missing for target: ${plan.target.symbol}`);
+  }
 
-  await fs.writeFile(path.join(harnessDir, "go.mod"), buildGoMod(plan, moduleName));
   await fs.writeFile(
-    harnessPath,
-    canAutoWireGoHarness(plan.target)
-      ? buildReadyGoHarness(plan)
-      : buildManualHarness(plan),
+    path.join(harnessDir, "go.mod"),
+    buildGoMod({
+      plan,
+      moduleName: module?.moduleName,
+      moduleRoot: module?.moduleRoot,
+      harnessDir,
+    }),
   );
+  await fs.writeFile(harnessPath, resolvedHarnessSource);
   await fs.writeFile(path.join(grammarDir, "grammar.json"), buildGrammarJson(plan));
   await fs.writeFile(path.join(corpusDir, "README.md"), plan.corpusIdeas.join("\n"));
   await fs.writeFile(path.join(campaignRoot, "campaign.json"), JSON.stringify(plan, null, 2));
@@ -391,10 +412,7 @@ export async function writeCampaign(
   await fs.writeFile(path.join(campaignRoot, "libafl.config.jsonc"), buildLibAflConfig());
   await fs.writeFile(
     path.join(campaignRoot, "fuzz.bash"),
-    buildFuzzScript(config, plan, {
-      harnessFileName,
-      runnable: runnableHarness,
-    }),
+    buildFuzzScript(config, plan, harnessFileName),
     { mode: 0o755 },
   );
 

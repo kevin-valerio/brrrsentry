@@ -8,6 +8,21 @@ export interface GuidelineSection {
 // `prompts/` is kept local-only (gitignored).
 export const FUZZING_GUIDELINES: GuidelineSection[] = [
   {
+    title: "Tooling (gosentry required)",
+    bullets: [
+      "Use gosentry and its features for the campaign (do not propose other fuzzers).",
+      "Do not guess gosentry flags. Base choices (panic-on, grammar mode, leak/race detectors) on the gosentry README.",
+    ],
+  },
+  {
+    title: "Target pairing (Go vs Go / Go vs X)",
+    bullets: [
+      "Harness must be Go vs Go or Go vs X (X can be Rust or C/C++).",
+      'It is acceptable to fuzz "itself vs itself" as long as the oracle and checks are meaningful.',
+      "Decide if race and leak detection is needed for this target based on expected bug class and runtime cost.",
+    ],
+  },
+  {
     title: "In-process requirement (coverage-guided)",
     bullets: [
       "At least one target must run in-process and provide coverage guidance.",
@@ -22,6 +37,14 @@ export const FUZZING_GUIDELINES: GuidelineSection[] = [
       "Harness must be reproducible from an attacker or bug-report perspective.",
       "Focus on security-impacting bugs and attacker-relevant paths.",
       "Avoid unrealistic deep internal helpers that cannot be reached through real usage.",
+      "Avoid targets that require secret/admin keys (example: sequencer key compromise) or admin-only flows.",
+    ],
+  },
+  {
+    title: "Use tests as harness guidance",
+    bullets: [
+      "Use end-to-end tests, integration tests, or other high-level tests to understand realistic workflows to fuzz.",
+      "Use tests/specs to decide what counts as accepted vs rejected input and what outputs must match.",
     ],
   },
   {
@@ -38,6 +61,7 @@ export const FUZZING_GUIDELINES: GuidelineSection[] = [
     bullets: [
       "Enable panic on critical error paths (for example via --panic-on) when applicable.",
       "Identify relevant error or logging functions and configure panic-on accordingly.",
+      "If the target uses leveled logging (example: LvlCrit/LvlError/...), panic on critical + error levels.",
     ],
   },
   {
@@ -62,8 +86,14 @@ export const FUZZING_GUIDELINES: GuidelineSection[] = [
     bullets: [
       "Bugs can include: crash, panic, hang, timeout, resource blowup, or state divergence.",
       "Also treat mismatched return codes, acceptance decisions, hashes or roots as bugs.",
+      "Also treat proof disagreements (or verification disagreements) as bugs when applicable.",
+      "For differential fuzzing, name the source-of-truth oracle and which target is the weakest to test.",
       "Prefer strong, app-specific invariants when a reference implementation exists.",
     ],
+  },
+  {
+    title: "Research",
+    bullets: ["If you need specs or reference implementations, internet research is allowed."],
   },
 ];
 
