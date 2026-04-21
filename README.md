@@ -4,7 +4,7 @@
 campaign workspace.
 
 It scans the target directory for likely fuzz entrypoints, asks for fuzz mode
-and scope, can use OpenAI to rank targets and draft a plan, then writes the
+and scope, can use a model to rank targets and draft a plan, then writes the
 campaign files under `.brrrsentry/`.
 
 It does not auto-run the real fuzzing campaign.
@@ -14,7 +14,7 @@ It does not auto-run the real fuzzing campaign.
 1. Point `brrrsentry` at a target directory.
 2. Choose a fuzz mode: `byte`, `struct-aware`, or `grammar`.
 3. Choose a scope: `narrow`, `end-to-end`, or `differential`.
-4. Review the discovered targets.
+4. Review the discovered targets (use `+` to expand harness info).
 5. Generate a campaign workspace under `.brrrsentry/campaigns/<slug>/`.
 
 ## What it looks for
@@ -61,18 +61,14 @@ node dist/index.js /path/to/target-repo
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--gosentry-path <path>` | Override the gosentry root path | `third_party/gosentry` |
-| `--model <model>` | OpenAI model for ranking and planning | `gpt-5.2` |
-| `--reasoning-effort <effort>` | OpenAI reasoning effort | `xhigh` |
-| `--api-base-url <url>` | Override the OpenAI API base URL | unset |
-| `--no-openai` | Disable model-backed ranking and planning | off |
+| `--model <model>` | Model for ranking and planning | `gpt-5.2` |
+| `--reasoning-effort <effort>` | Reasoning effort | `xhigh` |
+| `--api-base-url <url>` | Override the API base URL | unset |
 
-## OpenAI
+## Model calls
 
-If `OPENAI_API_KEY` is set and `--no-openai` is not used, `brrrsentry` calls
-the Responses API to rank discovered targets and draft the campaign plan.
-
-Without OpenAI, the tool still runs local discovery and still writes a campaign
-workspace. The difference is that ranking and planning fall back to local logic.
+`OPENAI_API_KEY` is required. `brrrsentry` calls the model API to rank
+discovered targets and draft the campaign plan.
 
 ## gosentry
 
@@ -86,6 +82,6 @@ Generated `fuzz.bash` expects a built gosentry `bin/go`.
 If you keep local fuzzing prompt material, place it in `prompts/1.md`,
 `prompts/2.md`, and `prompts/3.md`.
 
-`brrrsentry` uses that material only as extra source context for OpenAI
+`brrrsentry` uses that material only as extra source context for model-backed
 ranking and planning. Core campaign rules still come from
 `src/guidelines.ts`.

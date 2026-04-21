@@ -57,7 +57,8 @@ function summarizeTarget(target: CandidateTarget): string {
 }
 
 export function isOpenAIReady(config: AppConfig): boolean {
-  return config.openAIEnabled && Boolean(process.env.OPENAI_API_KEY);
+  void config;
+  return Boolean(process.env.OPENAI_API_KEY);
 }
 
 export async function rankTargetsWithOpenAI(

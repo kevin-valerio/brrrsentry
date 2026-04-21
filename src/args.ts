@@ -11,14 +11,13 @@ export function parseArgs(argv: string[]): AppConfig {
     .description("Agentic gosentry campaign generator")
     .argument("<targetDir>", "directory to fuzz")
     .option("--gosentry-path <path>", "override the gosentry root path")
-    .option("--model <model>", "OpenAI model", "gpt-5.2")
+    .option("--model <model>", "model for ranking and planning", "gpt-5.2")
     .option(
       "--reasoning-effort <effort>",
-      "OpenAI reasoning effort (low|medium|high|xhigh)",
+      "reasoning effort (low|medium|high|xhigh)",
       "xhigh",
     )
-    .option("--api-base-url <url>", "override the OpenAI API base URL")
-    .option("--no-openai", "disable OpenAI ranking and planning");
+    .option("--api-base-url <url>", "override the API base URL");
 
   program.parse(argv);
 
@@ -28,11 +27,14 @@ export function parseArgs(argv: string[]): AppConfig {
     model: string;
     reasoningEffort: string;
     apiBaseUrl?: string;
-    openai: boolean;
   }>();
 
   if (!targetDirArg) {
     throw new Error("targetDir is required");
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is required");
   }
 
   const repoRoot = process.cwd();
@@ -47,7 +49,6 @@ export function parseArgs(argv: string[]): AppConfig {
     gosentryPath,
     model: options.model,
     reasoningEffort: options.reasoningEffort as ReasoningEffort,
-    openAIEnabled: options.openai,
     apiBaseUrl: options.apiBaseUrl,
   };
 }
