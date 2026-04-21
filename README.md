@@ -84,8 +84,8 @@ targets, draft/repair the Go harness, and draft the campaign plan.
 Requests are sent with `store: false`, so they are not saved in the OpenAI
 dashboard logs.
 
-While the model is discovering targets or drafting the plan, the status pane shows
-a live gray model progress summary (high-level only, no raw chain-of-thought).
+While the model is discovering targets or drafting the plan, the Flow pane shows
+a live gray model thinking view (high-level only, no raw chain-of-thought).
 The selector is also briefly locked after each choice so a fast double Enter
 cannot select the next step twice.
 

@@ -290,6 +290,8 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "green" } },
   });
 
+  const flowThinkingHeight = "35%";
+
   const rightPane = blessed.box({
     parent: screen,
     top: 3,
@@ -342,12 +344,14 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "yellow" } },
   });
 
+  const statusLineHeight = 5;
+
   const statusLine = blessed.box({
     parent: statusBox,
     top: 0,
     left: 0,
     width: "100%",
-    height: 7,
+    height: statusLineHeight,
     tags: true,
     wrap: true,
     style: { fg: "white" },
@@ -363,12 +367,30 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "magenta" } },
   });
 
+  const thinkingPane = blessed.box({
+    parent: main,
+    bottom: 0,
+    left: 0,
+    width: "100%",
+    height: flowThinkingHeight,
+    border: "line",
+    label: " Thinking ",
+    tags: false,
+    wrap: true,
+    scrollable: true,
+    alwaysScroll: true,
+    keys: true,
+    vi: true,
+    mouse: true,
+    style: { fg: "gray", border: { fg: "gray" } },
+  });
+
   const list = blessed.list({
     parent: main,
     top: 0,
     left: 0,
     width: "100%",
-    height: "100%-1",
+    bottom: flowThinkingHeight,
     keys: true,
     vi: true,
     mouse: true,
@@ -383,7 +405,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     top: 0,
     left: 0,
     width: "100%",
-    height: "100%-1",
+    bottom: flowThinkingHeight,
     hidden: true,
     tags: false,
     scrollable: true,
@@ -395,10 +417,10 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   const logBox = blessed.log({
     parent: statusBox,
-    top: 7,
+    top: statusLineHeight,
     left: 0,
     width: "100%",
-    height: "100%-7",
+    height: `100%-${statusLineHeight}`,
     tags: false,
     scrollable: true,
     alwaysScroll: true,
@@ -433,6 +455,8 @@ export async function runTui(config: AppConfig): Promise<void> {
   let spinnerIndex = 0;
   let modelProgressSteps: string[] = [];
   let modelProgressIndex = 0;
+  let thinkingProgressLines: string[] = [];
+  let thinkingReasoningSummary = "";
   let activeFuzz: ReturnType<typeof spawnStreaming> | null = null;
   let quitAfterFuzzStops = false;
   let inputLocked = false;
@@ -472,20 +496,85 @@ export async function runTui(config: AppConfig): Promise<void> {
     return trimmed;
   }
 
+  function normalizeThinkingSummary(text: string): string {
+    const normalized = text.replace(/\r/g, "").trim();
+    if (normalized.length === 0) {
+      return "";
+    }
+    if (normalized.includes("\n")) {
+      return normalized;
+    }
+
+    return normalized.replace(/([.!?])\s+(?=[A-Z0-9])/g, "$1\n");
+  }
+
+  function renderThinking(): void {
+    const shouldScrollToBottom = thinkingPane.getScrollPerc() >= 99;
+    const lines: string[] = [];
+
+    if (thinkingProgressLines.length > 0) {
+      lines.push("Model progress:");
+      for (const line of thinkingProgressLines) {
+        lines.push(`- ${line}`);
+      }
+    }
+
+    const summary = normalizeThinkingSummary(thinkingReasoningSummary);
+    if (summary.length > 0) {
+      if (lines.length > 0) {
+        lines.push("");
+      }
+      lines.push("Model summary:");
+      lines.push("");
+      lines.push(summary);
+    }
+
+    if (lines.length === 0) {
+      lines.push("(No model thinking yet.)");
+    }
+
+    thinkingPane.setContent(lines.join("\n"));
+    if (shouldScrollToBottom) {
+      thinkingPane.setScroll(thinkingPane.getScrollHeight());
+    }
+    screen.render();
+  }
+
+  function clearThinking(): void {
+    thinkingProgressLines = [];
+    thinkingReasoningSummary = "";
+    renderThinking();
+  }
+
+  function appendThinkingProgress(text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+
+    const last = thinkingProgressLines.at(-1);
+    if (last === trimmed) {
+      return;
+    }
+
+    thinkingProgressLines.push(trimmed);
+    const maxLines = 60;
+    if (thinkingProgressLines.length > maxLines) {
+      thinkingProgressLines = thinkingProgressLines.slice(-maxLines);
+    }
+
+    renderThinking();
+  }
+
+  function setThinkingReasoningSummary(text: string): void {
+    thinkingReasoningSummary = text;
+    renderThinking();
+  }
+
   function renderStatus(): void {
     const lines = [`{bold}${statusPrimary}{/bold}`];
     if (statusDetail.length > 0) {
       lines.push(`{gray-fg}Step: ${blessed.escape(statusDetail)}{/gray-fg}`);
-    }
-    if (statusFlow.length > 0) {
-      lines.push(`{gray-fg}Model progress:{/gray-fg}`);
-      for (const line of statusFlow.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed.length === 0) {
-          continue;
-        }
-        lines.push(`{gray-fg}${blessed.escape(trimmed)}{/gray-fg}`);
-      }
     }
     statusLine.setContent(lines.join("\n"));
   }
@@ -501,12 +590,12 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   function setStatusFlow(text: string): void {
     statusFlow = formatStatusFlow(text);
-    renderStatus();
-    screen.render();
+    appendThinkingProgress(statusFlow);
   }
 
   function startModelProgress(steps: string[], intervalMs = 1400): void {
     stopModelProgress();
+    clearThinking();
     modelProgressSteps = steps.map((step) => step.trim()).filter(Boolean);
     modelProgressIndex = 0;
 
@@ -916,7 +1005,9 @@ export async function runTui(config: AppConfig): Promise<void> {
             fuzzMode: state.fuzzMode,
             scopeMode: state.scopeMode,
           },
-          undefined,
+          {
+            onReasoningSummary: setThinkingReasoningSummary,
+          },
         );
         setStatusFlow("validating target JSON");
       } catch (error) {
@@ -1043,7 +1134,9 @@ export async function runTui(config: AppConfig): Promise<void> {
       config,
       prompts,
       { plan, targetFileSnippet: snippet },
-      undefined,
+      {
+        onReasoningSummary: setThinkingReasoningSummary,
+      },
     );
 
     if (!harnessSource) {
@@ -1076,7 +1169,9 @@ export async function runTui(config: AppConfig): Promise<void> {
           harnessSource,
           buildError: compilation.output,
         },
-        undefined,
+        {
+          onReasoningSummary: setThinkingReasoningSummary,
+        },
       );
       if (!repaired.harnessSource) {
         throw new Error("model returned an empty repaired harness_source");
@@ -1125,7 +1220,9 @@ export async function runTui(config: AppConfig): Promise<void> {
         target,
         state.fuzzMode,
         state.scopeMode,
-        undefined,
+        {
+          onReasoningSummary: setThinkingReasoningSummary,
+        },
       );
       setStatusFlow("validating plan JSON");
       plan = {
@@ -1327,7 +1424,9 @@ export async function runTui(config: AppConfig): Promise<void> {
               findings: runFindings,
               runOutputTail: outputTail.join("\n"),
             },
-            undefined,
+            {
+              onReasoningSummary: setThinkingReasoningSummary,
+            },
           );
           setStatusFlow("validating verdict JSON");
           return result;
@@ -1525,5 +1624,6 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   setStatus("Ready");
   redraw();
+  renderThinking();
   list.focus();
 }
