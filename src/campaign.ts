@@ -43,9 +43,7 @@ export function createFallbackPlan(
         ? "Compare target acceptance decisions against an external oracle CLI wired through BRRRSENTRY_ORACLE_BIN."
         : "Use target crashes, panics, hangs, and gosentry detectors as the first oracle.",
     harnessStrategy:
-      canAutoWireGoHarness(target)
-        ? "Generate a package-level Go harness for the selected function."
-        : "Auto-generate a Go harness for the selected target, then compile-check and auto-fix it. If it still fails, switch to the next target.",
+      "Auto-generate a runnable Go harness for the selected target, compile-check it, and auto-fix it from compiler errors. If it still fails, switch to the next target.",
     grammarSummary:
       fuzzMode === "grammar"
         ? "Generate a grammar that matches the real input language of the target."
@@ -121,7 +119,7 @@ function buildGoMod(params: {
 function buildReadyGoHarness(plan: CampaignPlan): string {
   const target = plan.target;
   if (!canAutoWireGoHarness(target)) {
-    throw new Error(`Target cannot be auto-wired into a Go harness: ${target.symbol}`);
+    throw new Error(`Target cannot be wired into a ready-made Go harness: ${target.symbol}`);
   }
 
   const inputExpr = target.fuzzInputKind === "bytes" ? "data" : "string(data)";

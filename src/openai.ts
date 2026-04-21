@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { APIUserAbortError } from "openai";
 
 import {
   buildAutoJudgePrompt,
@@ -116,25 +116,38 @@ async function createJsonResponse<T>(
 
   let reasoningSummary = "";
 
-  for await (const event of stream) {
-    if (event.type === "response.reasoning_summary_text.delta") {
-      reasoningSummary += event.delta;
-      callbacks?.onReasoningSummary?.(reasoningSummary);
-      continue;
+  const streamTimeoutMs = 10 * 60 * 1000;
+  const streamTimeout = setTimeout(() => stream.abort(), streamTimeoutMs);
+
+  try {
+    for await (const event of stream) {
+      if (event.type === "response.reasoning_summary_text.delta") {
+        reasoningSummary += event.delta;
+        callbacks?.onReasoningSummary?.(reasoningSummary);
+        continue;
+      }
+
+      if (event.type === "response.reasoning_summary_text.done") {
+        reasoningSummary = event.text;
+        callbacks?.onReasoningSummary?.(reasoningSummary);
+      }
     }
 
-    if (event.type === "response.reasoning_summary_text.done") {
-      reasoningSummary = event.text;
-      callbacks?.onReasoningSummary?.(reasoningSummary);
+    const response = await stream.finalResponse();
+    const outputText = extractOutputText(response as ResponseLike);
+    if (!outputText) {
+      throw new Error("model returned no output text");
     }
+    return parseJsonObject<T>(outputText);
+  } catch (error) {
+    if (error instanceof APIUserAbortError) {
+      const seconds = Math.round(streamTimeoutMs / 1000);
+      throw new Error(`model stream timed out after ${seconds}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(streamTimeout);
   }
-
-  const response = await stream.finalResponse();
-  const outputText = extractOutputText(response as ResponseLike);
-  if (!outputText) {
-    throw new Error("model returned no output text");
-  }
-  return parseJsonObject<T>(outputText);
 }
 
 function summarizeRepositoryContext(context: RepositoryDiscoveryContext): string {
@@ -242,7 +255,6 @@ export async function buildCampaignPlanWithOpenAI(
   const payload = await createJsonResponse<{
     title?: string;
     oracle_strategy?: string;
-    harness_strategy?: string;
     grammar_summary?: string;
     corpus_ideas?: string[];
     panic_on_candidates?: string[];
@@ -257,7 +269,6 @@ export async function buildCampaignPlanWithOpenAI(
       payload.oracle_strategy ??
       "Start with gosentry crash/race/leak detectors. If BRRRSENTRY_ORACLE_BIN is configured, also compare acceptance/output against it.",
     harnessStrategy:
-      payload.harness_strategy ??
       "brrrsentry auto-generates a runnable Go harness with a single []byte fuzz input and compile-checks it before continuing.",
     grammarSummary:
       payload.grammar_summary ??

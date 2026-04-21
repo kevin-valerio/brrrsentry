@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { canAutoWireGoHarness, createFallbackPlan, writeCampaign } from "./campaign.js";
+import { createFallbackPlan, writeCampaign } from "./campaign.js";
 import { buildRepositoryDiscoveryContext } from "./discovery.js";
 import {
   autoJudgeFindingWithOpenAI,
@@ -153,7 +153,7 @@ function renderTargets(
   list.setItems(
     candidates.map(
       (candidate) => {
-        return `[AUTO] ${candidate.symbol} [${candidate.language}] score=${candidate.score} ${candidate.relativePath}`;
+        return `${candidate.symbol} [${candidate.language}] score=${candidate.score} ${candidate.relativePath}`;
       },
     ),
   );
@@ -703,28 +703,20 @@ export async function runTui(config: AppConfig): Promise<void> {
   function describeHarness(
     candidate: CandidateTarget,
   ): string {
-    const fastPath = canAutoWireGoHarness(candidate);
-    const harnessBadge = "{bold}{green-fg}AUTO{/green-fg}{/bold}";
     const languageBadge = formatLanguageBadge(candidate.language);
 
     const lines = [
       `{bold}Target{/bold}: {bold}${candidate.symbol}{/bold} [${languageBadge}]`,
-      `{bold}Harness{/bold}: ${harnessBadge} {gray-fg}${fastPath ? "simple signature" : "complex signature"}{/gray-fg}`,
-      "{bold}Would do{/bold}: auto-generate a runnable harness and run gosentry.",
+      "{bold}Would do{/bold}: draft a runnable harness, compile-check it, then run gosentry.",
     ];
 
     lines.push(
       "",
       "{bold}Details{/bold}",
       "",
-      "{bold}Harness wiring{/bold}",
-      "",
-      "brrrsentry always generates a runnable harness.",
-      "It will compile-check the harness before continuing.",
-      "If the harness cannot be made to compile, brrrsentry will switch to the next target and tell you.",
-      "",
-      "{bold}Fast path{/bold}: exported package-level Go func with []byte/string input (and optional context.Context).",
-      "{bold}Complex path{/bold}: brrrsentry asks the model to generate harness code + fixes it using compiler errors.",
+      "brrrsentry drafts a runnable Go harness and compiles it before continuing.",
+      "If the harness does not compile, brrrsentry asks the model to fix it from the compiler error (up to 3 tries).",
+      "If it still fails, brrrsentry switches to the next target and tells you.",
       "",
       `{bold}Path{/bold}: ${candidate.relativePath}`,
       `{bold}Signature{/bold}: ${candidate.signature}`,
@@ -809,8 +801,6 @@ export async function runTui(config: AppConfig): Promise<void> {
           `Scope: ${state.plan.scopeMode}`,
           "",
           `Oracle: ${state.plan.oracleStrategy}`,
-          "",
-          `Harness: ${state.plan.harnessStrategy}`,
           "",
           "Corpus ideas:",
           ...state.plan.corpusIdeas.map((idea) => `- ${idea}`),

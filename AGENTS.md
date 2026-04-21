@@ -50,3 +50,63 @@ Near-term focus
 - Prefer generating honest templates over fake “magic” harnesses
 - If we can infer a simple one-argument Go entrypoint, generate a runnable harness
 - If not, generate a clear manual-follow-up template and notes
+
+Control pass (manual smoke test)
+
+Goal: after any code change, run this once to make sure the full TUI flow still works end-to-end.
+
+1. Create a tiny Go target repo (example):
+
+```bash
+TARGET_DIR=/tmp/brrrsentry-smoke-target
+rm -rf "$TARGET_DIR"
+mkdir -p "$TARGET_DIR"
+cat >"$TARGET_DIR/go.mod" <<'EOF'
+module example.com/brrrsentrysmoke
+
+go 1.23
+EOF
+cat >"$TARGET_DIR/smoke.go" <<'EOF'
+package brrrsentrysmoke
+
+import (
+	"encoding/binary"
+	"errors"
+)
+
+func DecodePacket(data []byte) ([]byte, error) {
+	if len(data) < 4 {
+		return nil, errors.New("short header")
+	}
+	n := int(binary.BigEndian.Uint32(data[:4]))
+	if n < 0 || n > 1_000_000 {
+		return nil, errors.New("invalid length")
+	}
+	if len(data[4:]) < n {
+		return nil, errors.New("short payload")
+	}
+	payload := make([]byte, n)
+	copy(payload, data[4:4+n])
+	return payload, nil
+}
+EOF
+```
+
+2. Run the TUI:
+
+```bash
+npm run dev -- "$TARGET_DIR"
+```
+
+3. In the TUI:
+
+- Mode: Byte fuzzing
+- Scope: Narrow scope
+- Target: select the recommended target
+- Review: Generate campaign files
+- Result: Done
+
+4. Verify output:
+
+- The target repo now has `.brrrsentry/campaigns/<slug>/`
+- `FUZZ.md` and the `harness/` folder exist inside that campaign directory

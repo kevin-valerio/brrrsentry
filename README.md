@@ -14,7 +14,7 @@ It can optionally run the generated fuzzing campaign from inside the TUI.
 1. Point `brrrsentry` at a target directory.
 2. Choose a fuzz mode: `byte`, `struct-aware`, or `grammar`.
 3. Choose a scope: `narrow`, `end-to-end`, or `differential`.
-4. Review the discovered targets and harness details.
+4. Review the discovered targets.
 5. Generate a campaign workspace under `.brrrsentry/campaigns/<slug>/`.
 6. Run now (optional): pick cores, see the command, and watch gosentry run.
 
@@ -30,14 +30,14 @@ source preview set, then asks the model to pick concrete fuzz targets from that
 repo context.
 
 Today `brrrsentry` only runs Go targets. It prefers targets that are easy to
-auto-wire (exported package-level functions with `[]byte|string`, optionally
-paired with `context.Context`), but it can also handle more complex Go targets.
+run through a single `[]byte` fuzz input, but it can also handle targets that
+need extra argument/receiver wiring.
 
-For complex targets, `brrrsentry` asks the model to draft harness code and then
-compile-checks it. If the harness does not compile, `brrrsentry` feeds the
-compiler error back to the model to repair the harness. If a target still
-cannot be made runnable, `brrrsentry` auto-switches to the next best target and
-prints that decision in the Status log so the TUI never gets stuck.
+`brrrsentry` asks the model to draft harness code and then compile-checks it. If
+the harness does not compile, `brrrsentry` feeds the compiler error back to the
+model to repair the harness. If a target still cannot be made runnable,
+`brrrsentry` auto-switches to the next best target and prints that decision in
+the Status log.
 
 ## Generated workspace
 
@@ -88,6 +88,10 @@ While the model is discovering targets or drafting the plan, the Flow pane shows
 a live model thinking view (high-level only, no raw chain-of-thought).
 The selector is also briefly locked after each choice so a fast double Enter
 cannot select the next step twice.
+
+To avoid getting stuck forever if a streaming model request stalls, `brrrsentry`
+aborts a model stream after 10 minutes and treats it as a model failure (the TUI
+shows an error or falls back to the minimal local plan, depending on the step).
 
 ## gosentry
 
