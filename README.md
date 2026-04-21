@@ -14,7 +14,7 @@ It can optionally run the generated fuzzing campaign from inside the TUI.
 1. Point `brrrsentry` at a target directory.
 2. Choose a fuzz mode: `byte`, `struct-aware`, or `grammar`.
 3. Choose a scope: `narrow`, `end-to-end`, or `differential`.
-4. Review the discovered targets (use `+` to expand harness info).
+4. Review the discovered targets and harness details.
 5. Generate a campaign workspace under `.brrrsentry/campaigns/<slug>/`.
 6. Run now (optional): pick cores, see the command, and watch gosentry run.
 

@@ -46,7 +46,6 @@ interface AppState {
   scopeMode?: ScopeMode;
   discovery?: DiscoveryResult;
   selectedTarget?: CandidateTarget;
-  targetDetailsExpanded?: boolean;
   plan?: CampaignPlan;
   draftedHarnessSource?: string;
   generated?: GeneratedCampaign;
@@ -283,7 +282,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     parent: screen,
     top: 3,
     left: 0,
-    width: "60%",
+    width: "50%",
     bottom: 3,
     border: "line",
     label: " Flow ",
@@ -295,8 +294,8 @@ export async function runTui(config: AppConfig): Promise<void> {
   const rightPane = blessed.box({
     parent: screen,
     top: 3,
-    left: "60%",
-    width: "40%",
+    left: "50%",
+    width: "50%",
     bottom: 3,
   });
 
@@ -314,23 +313,6 @@ export async function runTui(config: AppConfig): Promise<void> {
     keys: true,
     vi: true,
     style: { border: { fg: "yellow" } },
-  });
-
-  const expandButton = blessed.box({
-    parent: harnessBox,
-    top: 0,
-    right: 1,
-    width: 5,
-    height: 3,
-    content: "[+]",
-    align: "center",
-    valign: "middle",
-    mouse: true,
-    style: {
-      fg: "black",
-      bg: "white",
-      hover: { bg: "green" },
-    },
   });
 
   const statusBox = blessed.box({
@@ -708,20 +690,18 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   function describeHarness(
     candidate: CandidateTarget,
-  ): { short: string; long: string } {
+  ): string {
     const fastPath = canAutoWireGoHarness(candidate);
     const harnessBadge = "{bold}{green-fg}AUTO{/green-fg}{/bold}";
     const languageBadge = formatLanguageBadge(candidate.language);
 
-    const shortLines = [
+    const lines = [
       `{bold}Target{/bold}: {bold}${candidate.symbol}{/bold} [${languageBadge}]`,
       `{bold}Harness{/bold}: ${harnessBadge} {gray-fg}${fastPath ? "simple signature" : "complex signature"}{/gray-fg}`,
       "{bold}Would do{/bold}: auto-generate a runnable harness and run gosentry.",
-      "{gray-fg}Tip: press + (or click [+]) for details.{/gray-fg}",
     ];
 
-    const longLines = [
-      ...shortLines,
+    lines.push(
       "",
       "{bold}Details{/bold}",
       "",
@@ -747,12 +727,9 @@ export async function runTui(config: AppConfig): Promise<void> {
       candidate.reasons.length > 0
         ? `{bold}Reasons{/bold}: ${candidate.reasons.join(", ")}`
         : "{bold}Reasons{/bold}: {gray-fg}(none){/gray-fg}",
-    ];
+    );
 
-    return {
-      short: shortLines.join("\n"),
-      long: longLines.join("\n"),
-    };
+    return lines.join("\n");
   }
 
   function refreshHarnessPane(): void {
@@ -762,7 +739,6 @@ export async function runTui(config: AppConfig): Promise<void> {
           .map((choice, index) => `${index + 1}. ${choice.label}\n${choice.description}`)
           .join("\n\n"),
       );
-      expandButton.hide();
       return;
     }
 
@@ -772,7 +748,6 @@ export async function runTui(config: AppConfig): Promise<void> {
           .map((choice, index) => `${index + 1}. ${choice.label}\n${choice.description}`)
           .join("\n\n"),
       );
-      expandButton.hide();
       return;
     }
 
@@ -780,15 +755,11 @@ export async function runTui(config: AppConfig): Promise<void> {
       const candidate = choiceFromIndex(state.discovery.recommended, currentListIndex());
       if (!candidate) {
         renderHarness("No target selected.");
-        expandButton.hide();
         return;
       }
 
-      const expanded = Boolean(state.targetDetailsExpanded);
       const description = describeHarness(candidate);
-      renderHarness(expanded ? description.long : description.short);
-      expandButton.setContent(expanded ? "[-]" : "[+]");
-      expandButton.show();
+      renderHarness(description);
       return;
     }
 
@@ -815,7 +786,6 @@ export async function runTui(config: AppConfig): Promise<void> {
           ...state.plan.corpusIdeas.map((idea) => `- ${idea}`),
         ].join("\n"),
       );
-      expandButton.hide();
       return;
     }
 
@@ -859,7 +829,6 @@ export async function runTui(config: AppConfig): Promise<void> {
           ...runLines,
         ].join("\n"),
       );
-      expandButton.hide();
       return;
     }
 
@@ -897,12 +866,10 @@ export async function runTui(config: AppConfig): Promise<void> {
       }
 
       renderHarness(lines.join("\n"));
-      expandButton.hide();
       return;
     }
 
     renderHarness("");
-    expandButton.hide();
   }
 
   function redraw(): void {
@@ -918,7 +885,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       setFooter("Arrows + Enter: choose scope mode | q: quit");
     } else if (state.step === "target" && state.discovery) {
       renderTargets(list, state.discovery.recommended);
-      setFooter("Arrows: choose target | Enter: select | +: harness info | q: quit");
+      setFooter("Arrows: choose target | Enter: select | q: quit");
     } else if (state.step === "review" && state.plan) {
       const actions: StepChoice[] = [
         {
@@ -1034,8 +1001,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     }
 
     state.step = "target";
-    state.targetDetailsExpanded = false;
-    setStatus("Review targets", "Enter: select | +: harness info");
+    setStatus("Review targets", "Enter: select");
     redraw();
   }
 
@@ -1573,18 +1539,6 @@ export async function runTui(config: AppConfig): Promise<void> {
       screen.render();
     }
   });
-
-  function toggleTargetDetails(): void {
-    if (inputLocked || state.step !== "target") {
-      return;
-    }
-    state.targetDetailsExpanded = !state.targetDetailsExpanded;
-    refreshHarnessPane();
-    screen.render();
-  }
-
-  expandButton.on("click", toggleTargetDetails);
-  screen.key(["+"], toggleTargetDetails);
 
   screen.key(["s"], () => {
     if (state.step !== "run") {
