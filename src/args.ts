@@ -11,7 +11,7 @@ export function parseArgs(argv: string[]): AppConfig {
     .description("Agentic gosentry campaign generator")
     .argument("<targetDir>", "directory to fuzz")
     .option("--gosentry-path <path>", "override the gosentry root path")
-    .option("--model <model>", "model for ranking and planning", "gpt-5.2")
+    .option("--model <model>", "model for discovery and planning", "gpt-5.2")
     .option(
       "--reasoning-effort <effort>",
       "reasoning effort (low|medium|high|xhigh)",

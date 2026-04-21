@@ -32,20 +32,25 @@ export async function loadPromptSources(repoRoot: string): Promise<PromptSources
   };
 }
 
-export function buildTargetRankingPrompt(input: {
+export function buildTargetDiscoveryPrompt(input: {
   targetDir: string;
   fuzzMode?: string;
   scopeMode?: string;
-  candidatesSummary: string;
+  repositoryContextSummary: string;
   sourcePromptText: string;
 }): string {
   const chunks: string[] = [
     "Return JSON only.",
-    "You are helping brrrsentry choose three strong fuzz targets for a gosentry campaign.",
+    "You are helping brrrsentry discover strong fuzz targets for a gosentry campaign.",
+    "Discovery must stay agentic and work across whatever languages are present in the repository.",
+    "Do not assume the repo is only Go, Rust, or C/C++.",
     formatGuidelinesForPrompt(),
-    "Pick targets that are realistic, attacker-relevant, and useful for differential or high-value fuzzing.",
+    "Pick concrete entrypoints that are realistic, attacker-relevant, and useful for differential or high-value fuzzing.",
     "Prefer parse, decode, unmarshal, verify, validate, state-transition, or protocol entrypoints.",
-    'JSON format: {"recommended_ids":["id1","id2","id3"],"notes":["note1","note2"]}',
+    "Only pick targets that are visible in the file previews below.",
+    "Do not invent files, symbols, or signatures.",
+    "Order targets from best to worst.",
+    'JSON format: {"targets":[{"relative_path":"...","symbol":"...","signature":"...","language":"...","kind":"...","score":73,"reasons":["..."]}],"notes":["note1","note2"]}',
     "",
     `Target directory: ${input.targetDir}`,
   ];
@@ -58,8 +63,8 @@ export function buildTargetRankingPrompt(input: {
   }
 
   chunks.push("");
-  chunks.push("Candidate targets:");
-  chunks.push(input.candidatesSummary);
+  chunks.push("Repository context:");
+  chunks.push(input.repositoryContextSummary);
 
   if (input.sourcePromptText.trim().length > 0) {
     chunks.push("");

@@ -3,16 +3,20 @@ import OpenAI from "openai";
 import {
   buildAutoJudgePrompt,
   buildCampaignPlanPrompt,
-  buildTargetRankingPrompt,
+  buildTargetDiscoveryPrompt,
   type PromptSources,
 } from "./prompts.js";
+import {
+  hydrateDiscoveredTargets,
+  type DiscoveredTargetDraft,
+} from "./discovery.js";
 import type {
   AppConfig,
   CampaignPlan,
   CandidateTarget,
   DiscoveryResult,
   FuzzMode,
-  RankedTargetResult,
+  RepositoryDiscoveryContext,
   ScopeMode,
 } from "./types.js";
 
@@ -77,21 +81,40 @@ async function createJsonResponse<T>(
   return parseJsonObject<T>(response.output_text);
 }
 
-function summarizeCandidates(candidates: CandidateTarget[]): string {
-  return candidates
-    .map((candidate) =>
-      [
-        `- id: ${candidate.id}`,
-        `  language: ${candidate.language}`,
-        `  path: ${candidate.relativePath}`,
-        `  symbol: ${candidate.symbol}`,
-        `  signature: ${candidate.signature}`,
-        `  kind: ${candidate.kind}`,
-        `  score: ${candidate.score}`,
-        `  reasons: ${candidate.reasons.join(", ")}`,
-      ].join("\n"),
-    )
-    .join("\n");
+function summarizeRepositoryContext(context: RepositoryDiscoveryContext): string {
+  const inventoryLines = context.inventory.map((file) => {
+    const hints = file.reasons.length > 0 ? ` | hints: ${file.reasons.join(", ")}` : "";
+    return `- ${file.relativePath} | path_score=${file.score}${hints}`;
+  });
+
+  const previewLines = context.previews.flatMap((preview) => {
+    const parts = [
+      `FILE: ${preview.relativePath}`,
+      `path_score: ${preview.score}`,
+    ];
+
+    if (preview.reasons.length > 0) {
+      parts.push(`path_hints: ${preview.reasons.join(", ")}`);
+    }
+
+    parts.push("preview:");
+    parts.push(preview.content);
+    parts.push("");
+
+    return parts;
+  });
+
+  return [
+    `Total candidate files seen locally: ${context.totalFiles}`,
+    `Inventory count sent: ${context.inventory.length}`,
+    `Preview count sent: ${context.previews.length}`,
+    "",
+    "Interesting file inventory (local path heuristic only, not final targets):",
+    ...inventoryLines,
+    "",
+    "File previews (pick targets only from these previews):",
+    ...previewLines,
+  ].join("\n");
 }
 
 function summarizeTarget(target: CandidateTarget): string {
@@ -112,29 +135,35 @@ export function isOpenAIReady(config: AppConfig): boolean {
   return Boolean(process.env.OPENAI_API_KEY);
 }
 
-export async function rankTargetsWithOpenAI(
+export async function discoverTargetsWithOpenAI(
   config: AppConfig,
-  discovery: DiscoveryResult,
+  discoveryContext: RepositoryDiscoveryContext,
   prompts: PromptSources,
   context?: { fuzzMode?: FuzzMode; scopeMode?: ScopeMode },
   callbacks?: ModelProgressCallbacks,
-): Promise<RankedTargetResult> {
-  const input = buildTargetRankingPrompt({
+): Promise<DiscoveryResult> {
+  const input = buildTargetDiscoveryPrompt({
     targetDir: config.targetDir,
     fuzzMode: context?.fuzzMode,
     scopeMode: context?.scopeMode,
-    candidatesSummary: summarizeCandidates(discovery.candidates.slice(0, 12)),
+    repositoryContextSummary: summarizeRepositoryContext(discoveryContext),
     sourcePromptText: prompts.combinedText,
   });
 
   const payload = await createJsonResponse<{
-    recommended_ids?: string[];
+    targets?: DiscoveredTargetDraft[];
     notes?: string[];
   }>(config, input, callbacks);
 
+  const discovery = await hydrateDiscoveredTargets(
+    config.targetDir,
+    discoveryContext,
+    payload.targets ?? [],
+  );
+
   return {
-    recommendedIds: payload.recommended_ids ?? [],
-    notes: payload.notes ?? [],
+    ...discovery,
+    notes: [...discovery.notes, ...(payload.notes ?? [])],
   };
 }
 

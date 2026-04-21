@@ -3,9 +3,9 @@
 `brrrsentry` is a full-screen TUI that turns a target codebase into a gosentry
 campaign workspace.
 
-It scans the target directory for likely fuzz entrypoints, asks for fuzz mode
-and scope, can use a model to rank targets and draft a plan, then writes the
-campaign files under `.brrrsentry/`.
+It builds a local repository context, asks for fuzz mode and scope, uses a
+model to discover likely fuzz entrypoints, then writes the campaign files under
+`.brrrsentry/`.
 
 It can optionally run the generated fuzzing campaign from inside the TUI.
 
@@ -25,9 +25,13 @@ auto-reruns the fuzzer once with the same cores.
 
 ## What it looks for
 
-The static scan currently looks for candidate functions in Go, Rust, and C/C++.
-It scores symbols that look useful for fuzzing, especially parse, decode,
-unmarshal, verify, validate, process, and protocol-facing entrypoints.
+Target discovery is agentic now. `brrrsentry` builds a local file inventory and
+source preview set, then asks the model to pick concrete fuzz targets from that
+repo context.
+
+This is not limited to Go, Rust, or C/C++. The model can discover targets from
+whatever languages are present in the target repo, as long as the local preview
+step can read the files as text.
 
 Go targets get the best support. If the selected Go target is a simple exported
 package-level function that takes one `[]byte` or `string`, `brrrsentry` writes
@@ -67,15 +71,15 @@ node dist/index.js /path/to/target-repo
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--gosentry-path <path>` | Override the gosentry root path | `third_party/gosentry` |
-| `--model <model>` | Model for ranking and planning | `gpt-5.2` |
+| `--model <model>` | Model for discovery and planning | `gpt-5.2` |
 | `--reasoning-effort <effort>` | Reasoning effort | `xhigh` |
 
 ## Model calls
 
-`OPENAI_API_KEY` is required. `brrrsentry` calls the model API to rank
-discovered targets and draft the campaign plan.
+`OPENAI_API_KEY` is required. `brrrsentry` calls the model API to discover
+targets and draft the campaign plan.
 
-While the model is ranking targets or drafting the plan, the status pane shows
+While the model is discovering targets or drafting the plan, the status pane shows
 a live gray model progress summary (high-level only, no raw chain-of-thought).
 The selector is also briefly locked after each choice so a fast double Enter
 cannot select the next step twice.
@@ -93,5 +97,5 @@ If you keep local fuzzing prompt material, place it in `prompts/1.md`,
 `prompts/2.md`, and `prompts/3.md`.
 
 `brrrsentry` uses that material only as extra source context for model-backed
-ranking and planning. Core campaign rules still come from
+discovery and planning. Core campaign rules still come from
 `src/guidelines.ts`.

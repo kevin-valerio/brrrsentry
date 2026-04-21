@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { writeCampaign, createFallbackPlan } from "./campaign.js";
-import { discoverTargets } from "./discovery.js";
+import { buildRepositoryDiscoveryContext } from "./discovery.js";
 import {
   autoJudgeFindingWithOpenAI,
   buildCampaignPlanWithOpenAI,
-  rankTargetsWithOpenAI,
+  discoverTargetsWithOpenAI,
 } from "./openai.js";
 import { loadPromptSources } from "./prompts.js";
 import { FUZZING_GUIDELINES } from "./guidelines.js";
@@ -171,6 +171,22 @@ function renderTargets(
   if (candidates.length > 0) {
     list.select(Math.min(selectedIndex, candidates.length - 1));
   }
+}
+
+function formatLanguageBadge(language: string): string {
+  const normalized = language.trim().toLowerCase() || "unknown";
+
+  if (normalized === "go") {
+    return `{cyan-fg}${normalized}{/cyan-fg}`;
+  }
+  if (normalized === "rust") {
+    return `{magenta-fg}${normalized}{/magenta-fg}`;
+  }
+  if (normalized === "c" || normalized === "cpp" || normalized === "c++") {
+    return `{yellow-fg}${normalized}{/yellow-fg}`;
+  }
+
+  return `{white-fg}${normalized}{/white-fg}`;
 }
 
 function choiceFromIndex<T>(values: T[], index: number): T | undefined {
@@ -618,12 +634,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     const harnessBadge = runnable
       ? "{bold}{green-fg}AUTO{/green-fg}{/bold}"
       : "{bold}{yellow-fg}MANUAL{/yellow-fg}{/bold}";
-    const languageBadge =
-      candidate.language === "go"
-        ? "{cyan-fg}go{/cyan-fg}"
-        : candidate.language === "rust"
-          ? "{magenta-fg}rust{/magenta-fg}"
-          : "{yellow-fg}c{/yellow-fg}";
+    const languageBadge = formatLanguageBadge(candidate.language);
     const inputType = candidate.acceptsBytes
       ? "[]byte"
       : candidate.acceptsString
@@ -873,72 +884,78 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   async function runDiscoveryFlow(): Promise<void> {
     startSpinner(
-      "Scanning target directory for candidate files",
-      "Static scan: searching Go/Rust/C/C++ symbols",
+      "Building repository context for model discovery",
+      "Local discovery: file inventory + previews",
     );
-    pushLog("Scanning target directory for candidate files...");
-    state.discovery = await discoverTargets(config.targetDir, {
+    pushLog("Building repository context for model discovery...");
+    const discoveryContext = await buildRepositoryDiscoveryContext(config.targetDir, {
       onProgress: (message) => {
         setStatusDetailLine(message);
-        pushLog(`Static scan: ${message}`);
+        pushLog(`Local discovery: ${message}`);
       },
     });
-    setStatusDetailLine(`Found ${state.discovery.candidates.length} static candidates`);
-    pushLog(`Found ${state.discovery.candidates.length} static candidates`);
 
-    for (const note of state.discovery.notes) {
-      pushLog(`Discovery: ${note}`);
+    if (discoveryContext.previews.length === 0) {
+      state.discovery = {
+        moduleName: discoveryContext.moduleName,
+        moduleRoot: discoveryContext.moduleRoot,
+        candidates: [],
+        recommended: [],
+        notes: [...discoveryContext.notes],
+      };
+    } else {
+      setStatusDetailLine(
+        `Prepared ${discoveryContext.previews.length} file previews from ${discoveryContext.totalFiles} files`,
+      );
+      pushLog(
+        `Prepared ${discoveryContext.previews.length} file previews from ${discoveryContext.totalFiles} files`,
+      );
+
+      startSpinner(
+        "Discovering likely fuzz targets",
+        `Model: ${config.model}/${config.reasoningEffort} | previews: ${discoveryContext.previews.length}`,
+      );
+      pushLog("Discovering likely fuzz targets with the model...");
+      startModelProgress([
+        "reviewing repository previews",
+        "choosing strong fuzz entrypoints",
+        "ordering the best target candidates",
+        "validating target JSON",
+      ]);
+
+      try {
+        state.discovery = await discoverTargetsWithOpenAI(
+          config,
+          discoveryContext,
+          prompts,
+          {
+            fuzzMode: state.fuzzMode,
+            scopeMode: state.scopeMode,
+          },
+          undefined,
+        );
+        setStatusFlow("validating target JSON");
+      } catch (error) {
+        setStatus("Target discovery failed", (error as Error).message);
+        throw error;
+      } finally {
+        stopModelProgress();
+      }
     }
 
     if (state.discovery.candidates.length === 0) {
-      setStatus("No targets found", "Static scan returned 0 candidates");
+      for (const note of state.discovery.notes) {
+        pushLog(`Discovery: ${note}`);
+      }
+      setStatus("No targets found", "Agentic discovery returned 0 candidates");
       return;
     }
 
-    const sentCandidates = Math.min(state.discovery.candidates.length, 12);
-    startSpinner(
-      "Scoring candidates by relevance to the request",
-      `Model: ${config.model}/${config.reasoningEffort} | candidates: ${state.discovery.candidates.length} | sent: ${sentCandidates}`,
-    );
-    pushLog("Scoring candidates by relevance to the request...");
-    startModelProgress([
-      "scoring candidates by relevance to the request",
-      "comparing top matches",
-      "selecting the most likely targets for editing",
-      "validating selected targets",
-    ]);
+    setStatusDetailLine(`Found ${state.discovery.candidates.length} discovered targets`);
+    pushLog(`Found ${state.discovery.candidates.length} discovered targets`);
 
-    try {
-      const ranked = await rankTargetsWithOpenAI(
-        config,
-        state.discovery,
-        prompts,
-        {
-          fuzzMode: state.fuzzMode,
-          scopeMode: state.scopeMode,
-        },
-        undefined,
-      );
-      setStatusFlow("validating selected targets");
-      const chosen = ranked.recommendedIds
-        .map((id) => state.discovery?.candidates.find((candidate) => candidate.id === id))
-        .filter((candidate): candidate is CandidateTarget => candidate !== undefined);
-      if (chosen.length === 0) {
-        throw new Error("model returned no valid targets");
-      }
-
-      const chosenGo = chosen.filter((candidate) => candidate.language === "go");
-      state.discovery.recommended =
-        chosenGo.length > 0 ? chosenGo.slice(0, 3) : chosen.slice(0, 3);
-
-      for (const note of ranked.notes) {
-        pushLog(`Model: ${note}`);
-      }
-    } catch (error) {
-      setStatus("Target ranking failed", (error as Error).message);
-      throw error;
-    } finally {
-      stopModelProgress();
+    for (const note of state.discovery.notes) {
+      pushLog(`Discovery: ${note}`);
     }
 
     state.step = "target";
