@@ -73,7 +73,8 @@ npm run dev -- /path/to/target-repo
 ```
 
 In the TUI, use arrows + Enter (or single mouse click) to select.
-The `Stdout` pane shows status, model thinking, and gosentry output.
+The `Stdout` pane shows status, model thinking, and gosentry output. During a
+fuzz run it expands to full width. Press `s` to stop fuzzing.
 
 Or run the built CLI:
 

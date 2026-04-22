@@ -37,7 +37,7 @@ Important implementation notes
 - Grammar mode in gosentry works best with a single `[]byte` or `string` fuzz input
 - gosentry supports panic-on-call, race/leak catching, grammar fuzzing, and coverage replay
 - In the TUI, format long fields (especially target `reasons`) as multi-line bullets, not one long line
-- In the TUI, the `Stdout` pane merges status + model thinking + gosentry output
+- In the TUI, the `Stdout` pane merges status + model thinking + gosentry output (full width during Run; `s` stops fuzzing)
 - Model tool-calling includes `shell_exec` which can run any command on the host machine
 
 Repository map

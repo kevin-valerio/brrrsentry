@@ -867,6 +867,16 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   function redraw(): void {
     header.setContent(buildHeader(config, state));
+    if (state.step === "run") {
+      main.hide();
+      rightPane.left = 0;
+      rightPane.width = "100%";
+    } else {
+      main.show();
+      rightPane.left = "50%";
+      rightPane.width = "50%";
+    }
+
     list.show();
     flowLog.hide();
 
@@ -1302,6 +1312,18 @@ export async function runTui(config: AppConfig): Promise<void> {
     }
   }
 
+  function requestStopFuzzing(): void {
+    if (state.step !== "run") {
+      return;
+    }
+    if (!activeFuzz) {
+      return;
+    }
+
+    setStatus("Stopping fuzzing", "Sending SIGINT...");
+    stopFuzzing();
+  }
+
   function formatExitSummary(result: SpawnStreamingResult): string {
     if (result.signal) {
       return `signal=${result.signal}`;
@@ -1680,15 +1702,16 @@ export async function runTui(config: AppConfig): Promise<void> {
     }
   });
 
+  outputBox.key(["s"], () => {
+    requestStopFuzzing();
+  });
+
+  harnessBox.key(["s"], () => {
+    requestStopFuzzing();
+  });
+
   screen.key(["s"], () => {
-    if (state.step !== "run") {
-      return;
-    }
-    if (!activeFuzz) {
-      return;
-    }
-    setStatus("Stopping fuzzing", "Sending SIGINT...");
-    stopFuzzing();
+    requestStopFuzzing();
   });
 
   screen.key(["b"], () => {
