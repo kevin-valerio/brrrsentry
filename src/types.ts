@@ -1,4 +1,4 @@
-export type FuzzMode = "byte" | "struct-aware" | "grammar";
+export type FuzzMode = "byte" | "grammar";
 export type ScopeMode = "narrow" | "end-to-end" | "differential";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 export type TargetLanguage = string;
@@ -16,6 +16,8 @@ export interface CandidateTarget {
   language: TargetLanguage;
   filePath: string;
   relativePath: string;
+  moduleName?: string;
+  moduleRoot?: string;
   symbol: string;
   signature: string;
   kind: string;

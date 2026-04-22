@@ -18,6 +18,7 @@ Current product decisions
 - Main stack is TypeScript + Node.js
 - UI is a full-screen TUI
 - OpenAI is enabled by default
+- No offline mode (OPENAI_API_KEY required)
 - Default model is `gpt-5.2`
 - Default reasoning effort is `xhigh`
 - CLI flags must be able to override model, reasoning, and gosentry path
@@ -34,8 +35,10 @@ Important implementation notes
   `https://developers.openai.com/mcp`
 - Use `third_party/gosentry/README.md` and `third_party/gosentry/misc/gosentry/nautilus/prompt.md` before changing gosentry integration
 - Grammar mode in gosentry works best with a single `[]byte` or `string` fuzz input
-- gosentry supports struct-aware fuzzing, panic-on-call, race/leak catching, grammar fuzzing, and coverage replay
+- gosentry supports panic-on-call, race/leak catching, grammar fuzzing, and coverage replay
 - In the TUI, format long fields (especially target `reasons`) as multi-line bullets, not one long line
+- In the TUI, the `Stdout` pane merges status + model thinking + gosentry output
+- Model tool-calling includes `shell_exec` which can run any command on the host machine
 
 Repository map
 
@@ -48,8 +51,7 @@ Near-term focus
 
 - Keep the first version thin but real
 - Prefer generating honest templates over fake “magic” harnesses
-- If we can infer a simple one-argument Go entrypoint, generate a runnable harness
-- If not, generate a clear manual-follow-up template and notes
+- Only list targets that brrrsentry can auto-wire into a runnable harness (no custom harness wiring yet)
 
 Control pass (manual smoke test)
 

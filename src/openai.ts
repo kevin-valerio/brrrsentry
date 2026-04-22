@@ -1,3 +1,8 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import OpenAI, { APIUserAbortError } from "openai";
 
 import {
@@ -10,6 +15,7 @@ import {
   hydrateDiscoveredTargets,
   type DiscoveredTargetDraft,
 } from "./discovery.js";
+import { runExecFile, tryExecFile } from "./process.js";
 import type {
   AppConfig,
   CampaignPlan,
@@ -39,6 +45,8 @@ function createClient(): OpenAI {
 function parseJsonObject<T>(text: string): T {
   return JSON.parse(text) as T;
 }
+
+const execFileAsync = promisify(execFile);
 
 type ResponseLike = {
   output_text?: unknown;
@@ -150,6 +158,553 @@ async function createJsonResponse<T>(
   }
 }
 
+function resolveInsideDir(rootDir: string, relativePath: string): string {
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(rootDir, relativePath);
+
+  if (resolved === root) {
+    return resolved;
+  }
+  if (!resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`path escapes root: ${relativePath}`);
+  }
+  return resolved;
+}
+
+function truncateText(input: string, maxChars: number): string {
+  const normalized = input.replace(/\r/g, "");
+  if (normalized.length <= maxChars) {
+    return normalized.trim();
+  }
+  return `${normalized.slice(0, maxChars).trimEnd()}\n... (truncated)`;
+}
+
+function truncateLines(input: string, maxLines: number): string {
+  const lines = input.replace(/\r/g, "").split("\n");
+  if (lines.length <= maxLines) {
+    return input.trim();
+  }
+  return `${lines.slice(0, maxLines).join("\n").trimEnd()}\n... (truncated)`;
+}
+
+function shouldIgnoreRepoPath(relativePath: string): boolean {
+  const loweredPath = relativePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(\.git|\.brrrsentry|node_modules|dist|build|coverage|vendor|target|out|bin|obj)(\/|$)/.test(
+    loweredPath,
+  );
+}
+
+type ToolContext = {
+  targetDir: string;
+};
+
+type ToolCall = {
+  type?: unknown;
+  call_id?: unknown;
+  name?: unknown;
+  arguments?: unknown;
+};
+
+type FunctionTool = OpenAI.Responses.FunctionTool;
+
+function getShellCommand(): { file: string; argsPrefix: string[] } {
+  if (process.platform === "win32") {
+    return { file: "cmd.exe", argsPrefix: ["/d", "/s", "/c"] };
+  }
+  return { file: "bash", argsPrefix: ["-lc"] };
+}
+
+function buildRepoTools(
+  context: ToolContext,
+): {
+  tools: FunctionTool[];
+  handlers: Record<string, (args: unknown) => Promise<string>>;
+} {
+  const listFilesTool: FunctionTool = {
+    type: "function",
+    name: "repo_list_files",
+    description:
+      "List files under the target repository. Returns relative POSIX-style paths.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        prefix: {
+          type: "string",
+          description:
+            "Optional subdirectory prefix (e.g. 'pkg/' or 'cmd/'). Uses forward slashes.",
+        },
+        suffix: {
+          type: "string",
+          description: "Optional filename suffix filter (e.g. '.go').",
+        },
+        offset: { type: "integer", minimum: 0, default: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 500, default: 200 },
+      },
+      required: ["prefix", "suffix", "offset", "limit"],
+      additionalProperties: false,
+    },
+  };
+
+  const readFileTool: FunctionTool = {
+    type: "function",
+    name: "repo_read_file",
+    description:
+      "Read a text file from the target repository. Use start_line/max_lines for partial reads.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        relative_path: { type: "string" },
+        start_line: { type: "integer", minimum: 1, default: 1 },
+        max_lines: { type: "integer", minimum: 1, maximum: 400, default: 200 },
+        max_chars: { type: "integer", minimum: 200, maximum: 20000, default: 8000 },
+      },
+      required: ["relative_path", "start_line", "max_lines", "max_chars"],
+      additionalProperties: false,
+    },
+  };
+
+  const searchTool: FunctionTool = {
+    type: "function",
+    name: "repo_search",
+    description:
+      "Search inside the target repository (ripgrep). By default it is fixed-string search; set regex=true to use regex mode.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        glob: {
+          type: "string",
+          description: "Optional ripgrep glob (e.g. '*.go' or '**/*.md').",
+        },
+        regex: { type: "boolean", default: false },
+        max_lines: { type: "integer", minimum: 1, maximum: 400, default: 120 },
+      },
+      required: ["query", "glob", "regex", "max_lines"],
+      additionalProperties: false,
+    },
+  };
+
+  const statTool: FunctionTool = {
+    type: "function",
+    name: "repo_stat_path",
+    description:
+      "Stat a path in the target repository (checks existence, file/dir).",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        relative_path: { type: "string" },
+      },
+      required: ["relative_path"],
+      additionalProperties: false,
+    },
+  };
+
+  const goTool: FunctionTool = {
+    type: "function",
+    name: "repo_go",
+    description:
+      "Run a Go command inside the target repository. Captures stdout+stderr (truncated).",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        args: {
+          type: "array",
+          items: { type: "string" },
+          description: "Arguments passed to `go` (for example: ['list','-m','-json']).",
+        },
+        cwd_relative: {
+          type: "string",
+          description:
+            "Optional working directory relative to the target repository (example: 'pkg/foo').",
+        },
+        timeout_ms: {
+          type: "integer",
+          minimum: 1000,
+          maximum: 60000,
+          default: 20000,
+        },
+      },
+      required: ["args", "cwd_relative", "timeout_ms"],
+      additionalProperties: false,
+    },
+  };
+
+  const shellTool: FunctionTool = {
+    type: "function",
+    name: "shell_exec",
+    description:
+      "Run a shell command on the host machine. This is fully unrestricted (any path, any command). Returns combined stdout+stderr (truncated).",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command string to run." },
+        cwd: {
+          type: "string",
+          description:
+            "Working directory (absolute or relative to the current process). Empty means current working directory.",
+          default: "",
+        },
+        timeout_ms: {
+          type: "integer",
+          minimum: 1000,
+          maximum: 10 * 60 * 1000,
+          default: 20000,
+        },
+      },
+      required: ["command", "cwd", "timeout_ms"],
+      additionalProperties: false,
+    },
+  };
+
+  const tools = [listFilesTool, readFileTool, searchTool, statTool, goTool, shellTool];
+
+  const handlers: Record<string, (args: unknown) => Promise<string>> = {
+    async repo_list_files(rawArgs): Promise<string> {
+      const parsed =
+        rawArgs && typeof rawArgs === "object"
+          ? (rawArgs as { prefix?: unknown; suffix?: unknown; offset?: unknown; limit?: unknown })
+          : {};
+
+      const prefix = typeof parsed.prefix === "string" ? parsed.prefix.trim() : "";
+      const suffix = typeof parsed.suffix === "string" ? parsed.suffix.trim() : "";
+      const offset = typeof parsed.offset === "number" ? parsed.offset : 0;
+      const limit = typeof parsed.limit === "number" ? parsed.limit : 200;
+
+      const raw = await runExecFile("rg", ["--files"], context.targetDir);
+      const allFiles = raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((file) => file.replace(/\\/g, "/"))
+        .filter((file) => !shouldIgnoreRepoPath(file));
+
+      const filtered = allFiles.filter((file) => {
+        if (prefix && !file.startsWith(prefix)) {
+          return false;
+        }
+        if (suffix && !file.endsWith(suffix)) {
+          return false;
+        }
+        return true;
+      });
+
+      const safeOffset = Math.max(0, Math.floor(offset));
+      const safeLimit = Math.min(500, Math.max(1, Math.floor(limit)));
+      const files = filtered.slice(safeOffset, safeOffset + safeLimit);
+
+      return JSON.stringify({
+        total: filtered.length,
+        offset: safeOffset,
+        limit: safeLimit,
+        files,
+      });
+    },
+
+    async repo_read_file(rawArgs): Promise<string> {
+      const parsed =
+        rawArgs && typeof rawArgs === "object"
+          ? (rawArgs as { relative_path?: unknown; start_line?: unknown; max_lines?: unknown; max_chars?: unknown })
+          : {};
+      const relativePath =
+        typeof parsed.relative_path === "string" ? parsed.relative_path.trim() : "";
+      if (!relativePath) {
+        throw new Error("relative_path is required");
+      }
+
+      const startLine = typeof parsed.start_line === "number" ? parsed.start_line : 1;
+      const maxLines = typeof parsed.max_lines === "number" ? parsed.max_lines : 200;
+      const maxChars = typeof parsed.max_chars === "number" ? parsed.max_chars : 8000;
+
+      const fullPath = resolveInsideDir(context.targetDir, relativePath);
+      const raw = await fs.readFile(fullPath, "utf8");
+      const lines = raw.replace(/\r/g, "").split("\n");
+      const startIndex = Math.max(0, Math.floor(startLine) - 1);
+      const slice = lines.slice(startIndex, startIndex + Math.max(1, Math.floor(maxLines)));
+
+      const numbered = slice.map((line, index) => `${startIndex + index + 1}: ${line}`);
+      const output = [
+        `FILE: ${relativePath.replace(/\\/g, "/")}`,
+        `LINES: ${startIndex + 1}-${startIndex + numbered.length}`,
+        "",
+        ...numbered,
+      ].join("\n");
+
+      return truncateText(output, Math.max(200, Math.floor(maxChars)));
+    },
+
+    async repo_search(rawArgs): Promise<string> {
+      const parsed =
+        rawArgs && typeof rawArgs === "object"
+          ? (rawArgs as { query?: unknown; glob?: unknown; regex?: unknown; max_lines?: unknown })
+          : {};
+      const query = typeof parsed.query === "string" ? parsed.query : "";
+      if (!query) {
+        throw new Error("query is required");
+      }
+
+      const glob = typeof parsed.glob === "string" ? parsed.glob.trim() : "";
+      const regex = typeof parsed.regex === "boolean" ? parsed.regex : false;
+      const maxLines = typeof parsed.max_lines === "number" ? parsed.max_lines : 120;
+
+      const args = [
+        "--line-number",
+        "--no-heading",
+        "--color",
+        "never",
+      ];
+      if (!regex) {
+        args.push("--fixed-string");
+      }
+      if (glob) {
+        args.push("--glob", glob);
+      }
+      args.push(query);
+
+      const raw = await tryExecFile("rg", args, context.targetDir);
+      if (!raw) {
+        return "NO_MATCHES";
+      }
+
+      return truncateLines(raw, Math.max(1, Math.floor(maxLines)));
+    },
+
+    async repo_stat_path(rawArgs): Promise<string> {
+      const parsed =
+        rawArgs && typeof rawArgs === "object"
+          ? (rawArgs as { relative_path?: unknown })
+          : {};
+      const relativePath =
+        typeof parsed.relative_path === "string" ? parsed.relative_path.trim() : "";
+      if (!relativePath) {
+        throw new Error("relative_path is required");
+      }
+
+      const fullPath = resolveInsideDir(context.targetDir, relativePath);
+      try {
+        const stat = await fs.stat(fullPath);
+        return JSON.stringify({
+          relative_path: relativePath.replace(/\\/g, "/"),
+          exists: true,
+          is_file: stat.isFile(),
+          is_dir: stat.isDirectory(),
+          size: stat.size,
+          mtime_ms: stat.mtimeMs,
+        });
+      } catch {
+        return JSON.stringify({
+          relative_path: relativePath.replace(/\\/g, "/"),
+          exists: false,
+        });
+      }
+    },
+
+    async repo_go(rawArgs): Promise<string> {
+      const parsed =
+        rawArgs && typeof rawArgs === "object"
+          ? (rawArgs as { args?: unknown; cwd_relative?: unknown; timeout_ms?: unknown })
+          : {};
+
+      const args = Array.isArray(parsed.args)
+        ? parsed.args.map((value) => String(value))
+        : [];
+      if (args.length === 0) {
+        throw new Error("args must be a non-empty array");
+      }
+
+      const cwdRelative = typeof parsed.cwd_relative === "string" ? parsed.cwd_relative.trim() : "";
+      const timeoutMs = typeof parsed.timeout_ms === "number" ? parsed.timeout_ms : 20000;
+
+      const cwd = cwdRelative
+        ? resolveInsideDir(context.targetDir, cwdRelative)
+        : context.targetDir;
+
+      try {
+        const { stdout, stderr } = await execFileAsync("go", args, {
+          cwd,
+          timeout: Math.max(1000, Math.min(60000, Math.floor(timeoutMs))),
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        return truncateLines(`${stdout}${stderr}`, 260);
+      } catch (error) {
+        const err = error as Error & { stdout?: string; stderr?: string };
+        const stdout = err.stdout ?? "";
+        const stderr = err.stderr ?? "";
+        const combined = [err.message, stdout, stderr].filter(Boolean).join("\n");
+        return truncateLines(combined, 260);
+      }
+    },
+
+    async shell_exec(rawArgs): Promise<string> {
+      const parsed =
+        rawArgs && typeof rawArgs === "object"
+          ? (rawArgs as { command?: unknown; cwd?: unknown; timeout_ms?: unknown })
+          : {};
+
+      const command = typeof parsed.command === "string" ? parsed.command.trim() : "";
+      if (!command) {
+        throw new Error("command is required");
+      }
+
+      const cwdRaw = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+      const cwd = cwdRaw.length > 0 ? cwdRaw : process.cwd();
+      const timeoutMs = typeof parsed.timeout_ms === "number" ? parsed.timeout_ms : 20000;
+
+      const shell = getShellCommand();
+
+      try {
+        const { stdout, stderr } = await execFileAsync(shell.file, [...shell.argsPrefix, command], {
+          cwd,
+          timeout: Math.max(1000, Math.min(10 * 60 * 1000, Math.floor(timeoutMs))),
+          maxBuffer: 32 * 1024 * 1024,
+        });
+        return truncateLines(`${stdout}${stderr}`, 260);
+      } catch (error) {
+        const err = error as Error & { stdout?: string; stderr?: string };
+        const stdout = err.stdout ?? "";
+        const stderr = err.stderr ?? "";
+        const combined = [err.message, stdout, stderr].filter(Boolean).join("\n");
+        return truncateLines(combined, 260);
+      }
+    },
+  };
+
+  return {
+    tools,
+    handlers,
+  };
+}
+
+async function createToolCallingJsonResponse<T>(
+  config: AppConfig,
+  input: string,
+  toolContext: ToolContext,
+  callbacks?: ModelProgressCallbacks,
+): Promise<T> {
+  const client = createClient();
+  const { tools, handlers } = buildRepoTools(toolContext);
+
+  const requestBase = {
+    store: false,
+    model: config.model,
+    reasoning: {
+      effort: config.reasoningEffort,
+      summary: "auto",
+    },
+    instructions:
+      "Return valid JSON. The word JSON is present on purpose. Do not add markdown fences.",
+    tools,
+    text: {
+      format: {
+        type: "json_object",
+      },
+    },
+  } as const;
+
+  const messages: OpenAI.Responses.ResponseInput = [{ role: "user", content: input }];
+
+  const maxRounds = 12;
+  for (let round = 0; round < maxRounds; round += 1) {
+    const response = await client.responses.create({
+      ...requestBase,
+      input: messages,
+    });
+
+    const reasoningSummary =
+      typeof (response as any)?.reasoning?.summary === "string"
+        ? ((response as any).reasoning.summary as string)
+        : "";
+    callbacks?.onReasoningSummary?.(reasoningSummary);
+
+    const outputText = extractOutputText(response as ResponseLike);
+    const responseOutput = Array.isArray((response as any)?.output)
+      ? ((response as any).output as unknown[])
+      : [];
+
+    const toolCalls = responseOutput
+          .filter((item) => item && typeof item === "object")
+          .map((item) => item as ToolCall)
+          .filter((item) => item.type === "function_call")
+      ;
+
+    if (toolCalls.length === 0) {
+      if (!outputText) {
+        throw new Error("model returned no output text");
+      }
+      return parseJsonObject<T>(outputText);
+    }
+
+    const resolvedCalls = toolCalls
+      .map((toolCall) => {
+        const callId = typeof toolCall.call_id === "string" ? toolCall.call_id : "";
+        const name = typeof toolCall.name === "string" ? toolCall.name : "";
+        const rawArgs = typeof toolCall.arguments === "string" ? toolCall.arguments : "";
+
+        return callId && name ? { callId, name, rawArgs } : null;
+      })
+      .filter((call): call is { callId: string; name: string; rawArgs: string } => call !== null);
+
+    for (const call of resolvedCalls) {
+      messages.push({
+        type: "function_call",
+        call_id: call.callId,
+        name: call.name,
+        arguments: call.rawArgs,
+      } as OpenAI.Responses.ResponseInputItem);
+    }
+
+    for (const call of resolvedCalls) {
+      const handler = handlers[call.name];
+      if (!handler) {
+        messages.push({
+          type: "function_call_output",
+          call_id: call.callId,
+          output: JSON.stringify({ error: `unknown tool: ${call.name}` }),
+        } as OpenAI.Responses.ResponseInputItem);
+        continue;
+      }
+
+      let args: unknown = {};
+      if (call.rawArgs.trim().length > 0) {
+        try {
+          args = JSON.parse(call.rawArgs) as unknown;
+        } catch (error) {
+          messages.push({
+            type: "function_call_output",
+            call_id: call.callId,
+            output: JSON.stringify({
+              error: `failed to parse tool arguments as JSON: ${(error as Error).message}`,
+            }),
+          } as OpenAI.Responses.ResponseInputItem);
+          continue;
+        }
+      }
+
+      try {
+        const output = await handler(args);
+        messages.push({
+          type: "function_call_output",
+          call_id: call.callId,
+          output,
+        } as OpenAI.Responses.ResponseInputItem);
+      } catch (error) {
+        messages.push({
+          type: "function_call_output",
+          call_id: call.callId,
+          output: JSON.stringify({ error: (error as Error).message }),
+        } as OpenAI.Responses.ResponseInputItem);
+      }
+    }
+  }
+
+  throw new Error(`tool-calling loop exceeded ${maxRounds} rounds`);
+}
+
 function summarizeRepositoryContext(context: RepositoryDiscoveryContext): string {
   const inventoryLines = context.inventory.map((file) => {
     const hints = file.reasons.length > 0 ? ` | hints: ${file.reasons.join(", ")}` : "";
@@ -181,7 +736,7 @@ function summarizeRepositoryContext(context: RepositoryDiscoveryContext): string
     "Interesting file inventory (local path heuristic only, not final targets):",
     ...inventoryLines,
     "",
-    "File previews (pick targets only from these previews):",
+    "File previews (initial sample; you can request more files via tools):",
     ...previewLines,
   ].join("\n");
 }
@@ -219,10 +774,15 @@ export async function discoverTargetsWithOpenAI(
     sourcePromptText: prompts.combinedText,
   });
 
-  const payload = await createJsonResponse<{
+  const payload = await createToolCallingJsonResponse<{
     targets?: DiscoveredTargetDraft[];
     notes?: string[];
-  }>(config, input, callbacks);
+  }>(
+    config,
+    input,
+    { targetDir: config.targetDir },
+    callbacks,
+  );
 
   const discovery = await hydrateDiscoveredTargets(
     config.targetDir,
@@ -252,14 +812,14 @@ export async function buildCampaignPlanWithOpenAI(
     sourcePromptText: prompts.combinedText,
   });
 
-  const payload = await createJsonResponse<{
+  const payload = await createToolCallingJsonResponse<{
     title?: string;
     oracle_strategy?: string;
     grammar_summary?: string;
     corpus_ideas?: string[];
     panic_on_candidates?: string[];
     report_expectations?: string[];
-  }>(config, input, callbacks);
+  }>(config, input, { targetDir: config.targetDir }, callbacks);
 
   return {
     title:
@@ -267,7 +827,9 @@ export async function buildCampaignPlanWithOpenAI(
       `Differential fuzzing plan for ${target.symbol} (${target.relativePath})`,
     oracleStrategy:
       payload.oracle_strategy ??
-      "Start with gosentry crash/race/leak detectors. If BRRRSENTRY_ORACLE_BIN is configured, also compare acceptance/output against it.",
+      (scopeMode === "differential"
+        ? "Start with gosentry crash/race/leak detectors. If BRRRSENTRY_ORACLE_BIN is configured, also compare acceptance/output against it."
+        : "Start with gosentry crash/race/leak detectors."),
     harnessStrategy:
       "brrrsentry auto-generates a runnable Go harness with a single []byte fuzz input and compile-checks it before continuing.",
     grammarSummary:
@@ -308,6 +870,8 @@ export async function draftGoHarnessWithOpenAI(
   const prompt = [
     "Return JSON only.",
     "You are generating a runnable Go fuzz harness for gosentry.",
+    "You can ask the application to fetch more repository context (list/search/read files) if you need more detail on the target types.",
+    "You can also run host shell commands (shell_exec). This is fully unrestricted.",
     "Output must be a single Go _test.go file that compiles.",
     "The harness must define one fuzz target that takes a single []byte input from the fuzzer.",
     "Derive any other required arguments from that byte slice (for example with bytes.Reader, encoding/binary, or string conversions).",
@@ -339,10 +903,10 @@ export async function draftGoHarnessWithOpenAI(
       : []),
   ].join("\n");
 
-  const payload = await createJsonResponse<{
+  const payload = await createToolCallingJsonResponse<{
     harness_source?: string;
     notes?: string[];
-  }>(config, prompt, callbacks);
+  }>(config, prompt, { targetDir: config.targetDir }, callbacks);
 
   return {
     harnessSource: payload.harness_source?.trim() ?? "",
@@ -372,6 +936,8 @@ export async function repairGoHarnessWithOpenAI(
   const prompt = [
     "Return JSON only.",
     "You are fixing a Go fuzz harness so it compiles.",
+    "You can ask the application to fetch more repository context (list/search/read files) if you need more detail on the target types.",
+    "You can also run host shell commands (shell_exec). This is fully unrestricted.",
     "You will be given the current harness source and a Go compiler error.",
     "Return the full updated Go source in harness_source.",
     "",
@@ -403,10 +969,10 @@ export async function repairGoHarnessWithOpenAI(
       : []),
   ].join("\n");
 
-  const payload = await createJsonResponse<{
+  const payload = await createToolCallingJsonResponse<{
     harness_source?: string;
     notes?: string[];
-  }>(config, prompt, callbacks);
+  }>(config, prompt, { targetDir: config.targetDir }, callbacks);
 
   return {
     harnessSource: payload.harness_source?.trim() ?? "",

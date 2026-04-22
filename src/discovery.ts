@@ -119,12 +119,17 @@ async function findGoModuleInfo(targetDir: string): Promise<GoModuleInfo> {
   while (true) {
     const goModPath = path.join(currentDir, "go.mod");
     try {
-      const content = await fs.readFile(goModPath, "utf8");
-      const firstLine = content
-        .split(/\r?\n/)
-        .find((line) => line.startsWith("module "));
+      const stat = await fs.stat(goModPath);
+      if (!stat.isFile()) {
+        throw new Error("go.mod is not a file");
+      }
+
+      const raw = await runExecFile("go", ["list", "-m", "-json"], currentDir);
+      const parsed = JSON.parse(raw) as { Path?: unknown; Dir?: unknown };
+      const moduleName = typeof parsed.Path === "string" ? parsed.Path.trim() : undefined;
+
       return {
-        moduleName: firstLine?.replace(/^module\s+/, "").trim(),
+        moduleName,
         moduleRoot: currentDir,
       };
     } catch {
@@ -277,8 +282,8 @@ function normalizeCandidateReasons(
 
 async function enrichGoCandidate(
   candidate: CandidateTarget,
-  module: GoModuleInfo,
 ): Promise<CandidateTarget> {
+  const module = await findGoModuleInfo(path.dirname(candidate.filePath));
   const packageName = await readPackageName(candidate.filePath);
 
   let parsedMetadata: Partial<CandidateTarget> = {
@@ -295,6 +300,8 @@ async function enrichGoCandidate(
   return {
     ...candidate,
     ...parsedMetadata,
+    moduleName: module.moduleName,
+    moduleRoot: module.moduleRoot,
     packageName,
     importPath: buildGoImportPath(candidate.filePath, module),
   };
@@ -304,7 +311,6 @@ async function hydrateCandidateTarget(
   rawTarget: DiscoveredTargetDraft,
   index: number,
   targetDir: string,
-  module: GoModuleInfo,
   inventoryByPath: Map<string, RepositoryDiscoveryFile>,
 ): Promise<CandidateTarget | null> {
   const candidatePath = normalizeRelativeCandidatePath(rawTarget.relative_path);
@@ -358,7 +364,7 @@ async function hydrateCandidateTarget(
     return baseCandidate;
   }
 
-  return await enrichGoCandidate(baseCandidate, module);
+  return await enrichGoCandidate(baseCandidate);
 }
 
 export async function buildRepositoryDiscoveryContext(
@@ -445,14 +451,10 @@ export async function hydrateDiscoveredTargets(
   rawTargets: DiscoveredTargetDraft[],
 ): Promise<DiscoveryResult> {
   const inventoryByPath = new Map(context.inventory.map((item) => [item.relativePath, item]));
-  const moduleInfo: GoModuleInfo = {
-    moduleName: context.moduleName,
-    moduleRoot: context.moduleRoot,
-  };
 
   const hydrated = await Promise.all(
     rawTargets.map((rawTarget, index) =>
-      hydrateCandidateTarget(rawTarget, index, targetDir, moduleInfo, inventoryByPath),
+      hydrateCandidateTarget(rawTarget, index, targetDir, inventoryByPath),
     ),
   );
 
@@ -480,9 +482,14 @@ export async function hydrateDiscoveredTargets(
     notes.push("No Go fuzz targets were returned by the agentic discovery step.");
   }
 
-  if (uniqueCandidates.some((candidate) => candidate.language === "go") && !context.moduleName) {
+  if (
+    uniqueCandidates.some((candidate) => candidate.language === "go") &&
+    !uniqueCandidates.some(
+      (candidate) => candidate.language === "go" && Boolean(candidate.moduleName),
+    )
+  ) {
     notes.push(
-      "No Go module root was found above the target directory. Auto-generated harnesses need a go.mod module.",
+      "No Go module root was found for the discovered targets. Auto-generated harnesses need a go.mod module.",
     );
   }
 

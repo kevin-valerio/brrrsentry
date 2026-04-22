@@ -12,11 +12,12 @@ It can optionally run the generated fuzzing campaign from inside the TUI.
 ## Flow
 
 1. Point `brrrsentry` at a target directory.
-2. Choose a fuzz mode: `byte`, `struct-aware`, or `grammar`.
+2. Choose a fuzz mode: `byte` or `grammar`.
 3. Choose a scope: `narrow`, `end-to-end`, or `differential`.
 4. Review the discovered targets.
 5. Generate a campaign workspace under `.brrrsentry/campaigns/<slug>/`.
 6. Run now (optional): pick cores, see the command, and watch gosentry run.
+   If gosentry is not built yet, brrrsentry will build it first (runs `<gosentry-path>/src/make.bash`).
 
 If gosentry stops with findings (crash/hang/race/leak), `brrrsentry` runs an
 auto-judge pass to classify false positives. If it is a harness issue, it
@@ -29,15 +30,25 @@ Target discovery is agentic now. `brrrsentry` builds a local file inventory and
 source preview set, then asks the model to pick concrete fuzz targets from that
 repo context.
 
-Today `brrrsentry` only runs Go targets. It prefers targets that are easy to
-run through a single `[]byte` fuzz input, but it can also handle targets that
-need extra argument/receiver wiring.
+During discovery and planning, the model can also request extra repository
+context (list/search/read files) from the app.
 
-`brrrsentry` asks the model to draft harness code and then compile-checks it. If
-the harness does not compile, `brrrsentry` feeds the compiler error back to the
-model to repair the harness. If a target still cannot be made runnable,
-`brrrsentry` auto-switches to the next best target and prints that decision in
-the Status log.
+The model can also run `shell_exec` commands. This is fully unrestricted (any
+path, any command). Only use `brrrsentry` in an environment you trust.
+
+Today `brrrsentry` only runs Go targets. It prefers targets that are easy to
+run through a single `[]byte` fuzz input (or `context.Context` + `[]byte`).
+Targets that need custom harness wiring are skipped for now.
+
+Go module roots are resolved per discovered target file (closest `go.mod`
+above it), so monorepos with nested Go modules are supported.
+
+`brrrsentry` generates a ready-made harness and compile-checks it before showing
+the target in the list.
+
+In `differential` scope, the ready harness can compare against an external oracle
+CLI wired through `BRRRSENTRY_ORACLE_BIN`. That oracle can be implemented in any
+language (Go, Rust, C/C++, etc).
 
 ## Generated workspace
 
@@ -61,6 +72,9 @@ Use the TUI directly in dev mode:
 npm run dev -- /path/to/target-repo
 ```
 
+In the TUI, use arrows + Enter (or single mouse click) to select.
+The `Stdout` pane shows status, model thinking, and gosentry output.
+
 Or run the built CLI:
 
 ```bash
@@ -79,19 +93,18 @@ node dist/index.js /path/to/target-repo
 ## Model calls
 
 `OPENAI_API_KEY` is required. `brrrsentry` calls the model API to discover
-targets, draft/repair the Go harness, and draft the campaign plan.
+targets, draft the campaign plan, and auto-judge fuzz findings.
 
 Requests are sent with `store: false`, so they are not saved in the OpenAI
 dashboard logs.
 
-While the model is discovering targets or drafting the plan, the Flow pane shows
-a live model thinking view (high-level only, no raw chain-of-thought).
+While the model is discovering targets or drafting the harness/plan, the Flow pane shows
+high-level progress plus a reasoning summary (no raw chain-of-thought).
 The selector is also briefly locked after each choice so a fast double Enter
 cannot select the next step twice.
 
-To avoid getting stuck forever if a streaming model request stalls, `brrrsentry`
-aborts a model stream after 10 minutes and treats it as a model failure (the TUI
-shows an error or falls back to the minimal local plan, depending on the step).
+For streamed model requests, `brrrsentry` aborts a stalled stream after 10 minutes and
+treats it as a model failure.
 
 ## gosentry
 
@@ -99,6 +112,7 @@ The default gosentry root is `third_party/gosentry`. Override it with
 `--gosentry-path` if you want to use a different checkout.
 
 Generated `fuzz.bash` expects a built gosentry `bin/go`.
+When you run from inside the TUI (Run now), brrrsentry will build gosentry automatically if `bin/go` is missing.
 
 ## Local prompt material
 

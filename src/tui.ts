@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createFallbackPlan, writeCampaign } from "./campaign.js";
+import {
+  buildReadyGoHarness,
+  canAutoWireGoHarness,
+  createFallbackPlan,
+  writeCampaign,
+} from "./campaign.js";
 import { buildRepositoryDiscoveryContext } from "./discovery.js";
 import {
   autoJudgeFindingWithOpenAI,
@@ -62,11 +67,6 @@ const modeChoices: StepChoice[] = [
     key: "byte",
     label: "Byte fuzzing",
     description: "Best simple default. Good when the real input format is still unclear.",
-  },
-  {
-    key: "struct-aware",
-    label: "Struct-aware fuzzing",
-    description: "Useful when gosentry can feed composite Go inputs directly.",
   },
   {
     key: "grammar",
@@ -289,8 +289,6 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "green" } },
   });
 
-  const flowThinkingHeight = "40%";
-
   const rightPane = blessed.box({
     parent: screen,
     top: 3,
@@ -315,28 +313,22 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "yellow" } },
   });
 
-  const statusBox = blessed.box({
+  const outputBox = blessed.box({
     parent: rightPane,
     bottom: 0,
     left: 0,
     width: "100%",
     height: "40%",
     border: "line",
-    label: " Status ",
-    style: { border: { fg: "yellow" } },
-  });
-
-  const statusLineHeight = 5;
-
-  const statusLine = blessed.box({
-    parent: statusBox,
-    top: 0,
-    left: 0,
-    width: "100%",
-    height: statusLineHeight,
-    tags: true,
+    label: " Stdout ",
+    tags: false,
     wrap: true,
-    style: { fg: "white" },
+    scrollable: true,
+    alwaysScroll: true,
+    keys: true,
+    vi: true,
+    mouse: true,
+    style: { fg: "white", border: { fg: "yellow" } },
   });
 
   const footer = blessed.box({
@@ -349,30 +341,12 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "magenta" } },
   });
 
-  const thinkingPane = blessed.box({
-    parent: main,
-    bottom: 0,
-    left: 0,
-    width: "100%",
-    height: flowThinkingHeight,
-    border: "line",
-    label: " Thinking ",
-    tags: false,
-    wrap: true,
-    scrollable: true,
-    alwaysScroll: true,
-    keys: true,
-    vi: true,
-    mouse: true,
-    style: { fg: "white", border: { fg: "gray" } },
-  });
-
   const list = blessed.list({
     parent: main,
     top: 0,
     left: 0,
     width: "100%",
-    bottom: flowThinkingHeight,
+    bottom: 0,
     keys: true,
     vi: true,
     mouse: true,
@@ -387,22 +361,8 @@ export async function runTui(config: AppConfig): Promise<void> {
     top: 0,
     left: 0,
     width: "100%",
-    bottom: flowThinkingHeight,
+    bottom: 0,
     hidden: true,
-    tags: false,
-    scrollable: true,
-    alwaysScroll: true,
-    keys: true,
-    vi: true,
-    mouse: true,
-  });
-
-  const logBox = blessed.log({
-    parent: statusBox,
-    top: statusLineHeight,
-    left: 0,
-    width: "100%",
-    height: `100%-${statusLineHeight}`,
     tags: false,
     scrollable: true,
     alwaysScroll: true,
@@ -443,6 +403,11 @@ export async function runTui(config: AppConfig): Promise<void> {
   let quitAfterFuzzStops = false;
   let inputLocked = false;
   let inputUnlockTimer: NodeJS.Timeout | undefined;
+  let lastUserActionAtMs = 0;
+  let lastUserActionIndex = -1;
+  const outputStdoutLines: string[] = [];
+  const outputStdoutTailLimit = 900;
+  const outputStdoutRenderLimit = 320;
 
   function stopSpinner(): void {
     if (spinnerTimer) {
@@ -490,46 +455,51 @@ export async function runTui(config: AppConfig): Promise<void> {
     return normalized.replace(/([.!?])\s+(?=[A-Z0-9])/g, "$1\n");
   }
 
-  function renderThinking(): void {
-    const shouldScrollToBottom = thinkingPane.getScrollPerc() >= 99;
+  function renderOutput(): void {
+    const shouldScrollToBottom = outputBox.getScrollPerc() >= 99;
     const lines: string[] = [];
 
+    const primary = statusPrimary.trim();
+    const detail = statusDetail.trim();
+    const statusText = [primary, detail].filter(Boolean).join(" | ");
+    lines.push(`Status: ${statusText.length > 0 ? statusText : "(empty)"}`);
+
     const currentProgress = thinkingProgressLines.at(-1);
-    if (currentProgress) {
-      lines.push("Progress:");
-      lines.push(`- ${currentProgress}`);
-    }
-
     const summary = normalizeThinkingSummary(thinkingReasoningSummary);
-    if (summary.length > 0) {
-      const summaryLines = summary
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .slice(0, 10);
+    const summaryLines =
+      summary.length > 0
+        ? summary
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+            .slice(0, 8)
+        : [];
 
-      if (summaryLines.length > 0) {
-        if (lines.length > 0) {
-          lines.push("");
-        }
-        lines.push("Summary:");
-        for (const line of summaryLines) {
-          if (/^[-*•]\s+/.test(line)) {
-            lines.push(line);
-          } else {
-            lines.push(`- ${line}`);
-          }
-        }
+    if (currentProgress) {
+      lines.push(`Progress: ${currentProgress}`);
+    }
+    if (summaryLines.length > 0) {
+      lines.push("");
+      lines.push("Summary:");
+      for (const line of summaryLines) {
+        lines.push(`- ${line}`);
       }
     }
 
-    if (lines.length === 0) {
-      lines.push("(No model thinking yet.)");
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+
+    const stdoutLines = outputStdoutLines.slice(-outputStdoutRenderLimit);
+    if (stdoutLines.length === 0) {
+      lines.push("(stdout empty)");
+    } else {
+      lines.push(...stdoutLines);
     }
 
-    thinkingPane.setContent(lines.join("\n"));
+    outputBox.setContent(lines.join("\n"));
     if (shouldScrollToBottom) {
-      thinkingPane.setScroll(thinkingPane.getScrollHeight());
+      outputBox.setScroll(outputBox.getScrollHeight());
     }
     screen.render();
   }
@@ -537,7 +507,7 @@ export async function runTui(config: AppConfig): Promise<void> {
   function clearThinking(): void {
     thinkingProgressLines = [];
     thinkingReasoningSummary = "";
-    renderThinking();
+    renderOutput();
   }
 
   function appendThinkingProgress(text: string): void {
@@ -557,20 +527,12 @@ export async function runTui(config: AppConfig): Promise<void> {
       thinkingProgressLines = thinkingProgressLines.slice(-maxLines);
     }
 
-    renderThinking();
+    renderOutput();
   }
 
   function setThinkingReasoningSummary(text: string): void {
     thinkingReasoningSummary = text;
-    renderThinking();
-  }
-
-  function renderStatus(): void {
-    const lines = [`{bold}${statusPrimary}{/bold}`];
-    if (statusDetail.length > 0) {
-      lines.push(`{gray-fg}Step: ${blessed.escape(statusDetail)}{/gray-fg}`);
-    }
-    statusLine.setContent(lines.join("\n"));
+    renderOutput();
   }
 
   function setStatus(text: string, detail?: string): void {
@@ -578,8 +540,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     statusPrimary = text;
     statusDetail = detail ?? "";
     statusFlow = "";
-    renderStatus();
-    screen.render();
+    renderOutput();
   }
 
   function setStatusFlow(text: string): void {
@@ -620,8 +581,7 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   function setStatusDetailLine(text: string): void {
     statusDetail = text;
-    renderStatus();
-    screen.render();
+    renderOutput();
   }
 
   function startSpinner(prefix: string, detail?: string): void {
@@ -636,9 +596,8 @@ export async function runTui(config: AppConfig): Promise<void> {
     const tick = () => {
       const elapsedSeconds = Math.floor((Date.now() - spinnerStartMs) / 1000);
       const frame = spinnerFrames[spinnerIndex++ % spinnerFrames.length];
-      statusPrimary = `${spinnerPrefix} {cyan-fg}${frame}{/cyan-fg} {gray-fg}${elapsedSeconds}s{/gray-fg}`;
-      renderStatus();
-      screen.render();
+      statusPrimary = `${spinnerPrefix} ${frame} ${elapsedSeconds}s`;
+      renderOutput();
     };
 
     spinnerTimer = setInterval(tick, 250);
@@ -678,13 +637,28 @@ export async function runTui(config: AppConfig): Promise<void> {
   }
 
   function pushLog(message: string): void {
-    logBox.add(message);
-    screen.render();
+    const parts = message.replace(/\r/g, "").split("\n");
+    for (const part of parts) {
+      if (part.trim().length === 0) {
+        continue;
+      }
+      outputStdoutLines.push(`app: ${part}`);
+    }
+    if (outputStdoutLines.length > outputStdoutTailLimit) {
+      outputStdoutLines.splice(0, outputStdoutLines.length - outputStdoutTailLimit);
+    }
+    renderOutput();
   }
 
   function pushFlow(message: string): void {
-    flowLog.add(message);
-    screen.render();
+    const parts = message.replace(/\r/g, "").split("\n");
+    for (const part of parts) {
+      outputStdoutLines.push(part);
+    }
+    if (outputStdoutLines.length > outputStdoutTailLimit) {
+      outputStdoutLines.splice(0, outputStdoutLines.length - outputStdoutTailLimit);
+    }
+    renderOutput();
   }
 
   function setFooter(text: string): void {
@@ -707,16 +681,15 @@ export async function runTui(config: AppConfig): Promise<void> {
 
     const lines = [
       `{bold}Target{/bold}: {bold}${candidate.symbol}{/bold} [${languageBadge}]`,
-      "{bold}Would do{/bold}: draft a runnable harness, compile-check it, then run gosentry.",
+      "{bold}Would do{/bold}: generate a ready harness, compile-check it, then run gosentry.",
     ];
 
     lines.push(
       "",
       "{bold}Details{/bold}",
       "",
-      "brrrsentry drafts a runnable Go harness and compiles it before continuing.",
-      "If the harness does not compile, brrrsentry asks the model to fix it from the compiler error (up to 3 tries).",
-      "If it still fails, brrrsentry switches to the next target and tells you.",
+      "brrrsentry only lists targets it can auto-wire into a runnable Go harness.",
+      "Targets are compile-checked before you can select them.",
       "",
       `{bold}Path{/bold}: ${candidate.relativePath}`,
       `{bold}Signature{/bold}: ${candidate.signature}`,
@@ -933,8 +906,8 @@ export async function runTui(config: AppConfig): Promise<void> {
       setFooter("Enter: action | q: quit");
     } else if (state.step === "run") {
       list.hide();
-      flowLog.show();
-      flowLog.focus();
+      flowLog.hide();
+      outputBox.focus();
       setFooter("s: stop fuzzing | b: back | q: quit");
     }
 
@@ -1010,6 +983,57 @@ export async function runTui(config: AppConfig): Promise<void> {
         pushLog(`Discovery: ${note}`);
       }
       setStatus("No targets found", "Agentic discovery returned 0 candidates");
+      return;
+    }
+
+    startSpinner("Checking targets", "Compiling ready harnesses");
+    const runnableTargets: CandidateTarget[] = [];
+    const skippedTargets: string[] = [];
+
+    for (const candidate of state.discovery.candidates) {
+      if (!canAutoWireGoHarness(candidate)) {
+        skippedTargets.push(`${candidate.symbol} (${candidate.relativePath}): needs custom harness`);
+        continue;
+      }
+      if (!candidate.moduleName || !candidate.moduleRoot) {
+        skippedTargets.push(`${candidate.symbol} (${candidate.relativePath}): missing go.mod module`);
+        continue;
+      }
+
+      const plan = createFallbackPlan(candidate, state.fuzzMode!, state.scopeMode!);
+      const harnessSource = buildReadyGoHarness(plan);
+      const compilation = await compileGoHarness({
+        moduleName: candidate.moduleName,
+        moduleRoot: candidate.moduleRoot,
+        harnessSource,
+      });
+      if (compilation.ok) {
+        runnableTargets.push(candidate);
+        continue;
+      }
+
+      skippedTargets.push(`${candidate.symbol} (${candidate.relativePath}): does not compile`);
+      pushLog(`Target skipped: ${candidate.symbol} (${candidate.relativePath})`);
+      pushLog(compilation.output.trim().length > 0 ? compilation.output : "(no output)");
+    }
+
+    state.discovery = {
+      ...state.discovery,
+      candidates: runnableTargets,
+      recommended: runnableTargets.slice(0, 3),
+      notes: [
+        ...state.discovery.notes,
+        ...(skippedTargets.length > 0
+          ? [`Skipped ${skippedTargets.length} targets that were not runnable.`]
+          : []),
+      ],
+    };
+
+    if (state.discovery.candidates.length === 0) {
+      for (const note of state.discovery.notes) {
+        pushLog(`Discovery: ${note}`);
+      }
+      setStatus("No runnable targets found", "Only ready-harness targets are supported right now.");
       return;
     }
 
@@ -1104,17 +1128,34 @@ export async function runTui(config: AppConfig): Promise<void> {
   }
 
   async function draftRunnableHarness(plan: CampaignPlan): Promise<string> {
-    const moduleName = state.discovery?.moduleName;
-    const moduleRoot = state.discovery?.moduleRoot;
-    const snippet = await readTargetSnippet(plan.target);
+    const moduleName = plan.target.moduleName;
+    const moduleRoot = plan.target.moduleRoot;
 
     if (!moduleName || !moduleRoot) {
-      throw new Error("missing go.mod module info for harness compilation");
+      throw new Error("missing go.mod module info for selected target");
     }
     if (!plan.target.importPath) {
       throw new Error("missing Go import path for selected target");
     }
 
+    if (canAutoWireGoHarness(plan.target)) {
+      setStatusFlow("building ready harness");
+      const harnessSource = buildReadyGoHarness(plan);
+
+      setStatusFlow("compiling harness");
+      const compilation = await compileGoHarness({
+        moduleName,
+        moduleRoot,
+        harnessSource,
+      });
+      if (!compilation.ok) {
+        throw new Error(`ready harness did not compile\n${compilation.output}`);
+      }
+
+      return harnessSource;
+    }
+
+    const snippet = await readTargetSnippet(plan.target);
     setStatusFlow("drafting harness JSON");
     let { harnessSource } = await draftGoHarnessWithOpenAI(
       config,
@@ -1240,8 +1281,8 @@ export async function runTui(config: AppConfig): Promise<void> {
       config,
       state.plan,
       {
-        moduleName: state.discovery?.moduleName,
-        moduleRoot: state.discovery?.moduleRoot,
+        moduleName: state.plan.target.moduleName,
+        moduleRoot: state.plan.target.moduleRoot,
       },
       state.draftedHarnessSource,
     );
@@ -1269,6 +1310,63 @@ export async function runTui(config: AppConfig): Promise<void> {
       return `exit=${result.exitCode}`;
     }
     return "exit=unknown";
+  }
+
+  async function ensureGosentryBuilt(): Promise<void> {
+    const gosentryBin = path.join(config.gosentryPath, "bin", "go");
+
+    try {
+      const stat = await fs.stat(gosentryBin);
+      if (stat.isFile()) {
+        return;
+      }
+    } catch {
+      // build below
+    }
+
+    const gosentrySrcDir = path.join(config.gosentryPath, "src");
+    const outputTail: string[] = [];
+    const tailLimit = 140;
+
+    startSpinner("Building gosentry", `${formatPathShort(config.gosentryPath)}/src`);
+    pushFlow("");
+    pushFlow(`# gosentry missing; running ./make.bash in ${gosentrySrcDir}`);
+
+    const build = spawnStreaming("./make.bash", [], {
+      cwd: gosentrySrcDir,
+      env: process.env,
+      onLine: (line) => {
+        outputTail.push(line);
+        if (outputTail.length > tailLimit) {
+          outputTail.shift();
+        }
+        pushFlow(line);
+      },
+    });
+    const result = await build.completion;
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        [
+          `gosentry build failed (${formatExitSummary(result)})`,
+          "",
+          "Build output (tail):",
+          ...outputTail,
+        ].join("\n"),
+      );
+    }
+
+    try {
+      const stat = await fs.stat(gosentryBin);
+      if (!stat.isFile()) {
+        throw new Error();
+      }
+    } catch {
+      throw new Error(`gosentry build finished, but ${gosentryBin} is still missing`);
+    }
+
+    pushFlow("");
+    pushFlow(`# gosentry ready: ${gosentryBin}`);
   }
 
   async function promptRunCores(): Promise<string | null> {
@@ -1309,11 +1407,19 @@ export async function runTui(config: AppConfig): Promise<void> {
     state.runAutoJudge = undefined;
     state.step = "run";
 
-    flowLog.setContent("");
-    flowLog.setScroll(0);
+    outputStdoutLines.length = 0;
     pushFlow(`$ ${state.runCommand}`);
 
     redraw();
+
+    try {
+      await ensureGosentryBuilt();
+    } catch (error) {
+      setStatus("gosentry build failed", (error as Error).message);
+      state.fuzzRunning = false;
+      redraw();
+      return;
+    }
 
     const libAflPattern = /^libafl output dir:\s*(.+)$/i;
     let autoRerunsRemaining = 1;
@@ -1374,6 +1480,16 @@ export async function runTui(config: AppConfig): Promise<void> {
       }
 
       if (state.runFindings.length === 0) {
+        if (result.exitCode !== 0 && !state.runLibAflOutputDir) {
+          pushFlow("");
+          pushFlow("Run failed before LibAFL output was created.");
+          pushFlow("This usually means gosentry could not build or start the harness.");
+          pushFlow("Press b to go back, or scroll to read the build error above.");
+          stopSpinner();
+          redraw();
+          return;
+        }
+
         if (attempt === 1) {
           setStatus("Fuzzing stopped", "No findings detected yet.");
         } else {
@@ -1450,6 +1566,9 @@ export async function runTui(config: AppConfig): Promise<void> {
   }
 
   list.on("select", async (_item, index) => {
+    lastUserActionAtMs = Date.now();
+    lastUserActionIndex = index;
+
     if (inputLocked) {
       return;
     }
@@ -1484,36 +1603,17 @@ export async function runTui(config: AppConfig): Promise<void> {
         if (!selected) {
           return;
         }
-        const candidatesToTry = [
-          selected,
-          ...state.discovery.candidates.filter((candidate) => candidate.id !== selected.id),
-        ];
-
-        let previousTarget = selected;
-        for (const [candidateIndex, candidate] of candidatesToTry.entries()) {
-          if (candidateIndex > 0) {
-            pushLog(
-              `Auto-switching target: ${previousTarget.symbol} failed to generate a runnable harness. Trying ${candidate.symbol}...`,
-            );
-          }
-
-          state.selectedTarget = candidate;
-          const ok = await buildPlanFlow(candidate);
-          if (ok) {
-            if (candidate.id !== selected.id) {
-              pushLog(`Selected target is now: ${candidate.symbol} (${candidate.relativePath})`);
-            }
-            return;
-          }
-
-          previousTarget = candidate;
+        state.selectedTarget = selected;
+        const ok = await buildPlanFlow(selected);
+        if (ok) {
+          return;
         }
 
         state.selectedTarget = undefined;
         state.plan = undefined;
         state.draftedHarnessSource = undefined;
         state.step = "target";
-        setStatus("No runnable targets", "All discovered targets failed harness generation.");
+        setStatus("Harness generation failed", "Pick a different target.");
         redraw();
         return;
       }
@@ -1548,6 +1648,26 @@ export async function runTui(config: AppConfig): Promise<void> {
         unlockInput(inputUnlockDelayMs);
       }
     }
+  });
+
+  list.on("element click", () => {
+    if (inputLocked) {
+      return;
+    }
+
+    setTimeout(() => {
+      const now = Date.now();
+      if (inputLocked) {
+        return;
+      }
+
+      const selectedIndex = currentListIndex();
+      if (now - lastUserActionAtMs < 80 && lastUserActionIndex === selectedIndex) {
+        return;
+      }
+
+      (list as any).enterSelected();
+    }, 0);
   });
 
   list.on("keypress", () => {
@@ -1598,6 +1718,5 @@ export async function runTui(config: AppConfig): Promise<void> {
 
   setStatus("Ready");
   redraw();
-  renderThinking();
   list.focus();
 }

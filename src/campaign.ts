@@ -43,7 +43,7 @@ export function createFallbackPlan(
         ? "Compare target acceptance decisions against an external oracle CLI wired through BRRRSENTRY_ORACLE_BIN."
         : "Use target crashes, panics, hangs, and gosentry detectors as the first oracle.",
     harnessStrategy:
-      "Auto-generate a runnable Go harness for the selected target, compile-check it, and auto-fix it from compiler errors. If it still fails, switch to the next target.",
+      "Auto-generate a runnable Go harness for the selected target, compile-check it, and auto-fix it from compiler errors.",
     grammarSummary:
       fuzzMode === "grammar"
         ? "Generate a grammar that matches the real input language of the target."
@@ -116,12 +116,13 @@ function buildGoMod(params: {
   ].join("\n");
 }
 
-function buildReadyGoHarness(plan: CampaignPlan): string {
+export function buildReadyGoHarness(plan: CampaignPlan): string {
   const target = plan.target;
   if (!canAutoWireGoHarness(target)) {
     throw new Error(`Target cannot be wired into a ready-made Go harness: ${target.symbol}`);
   }
 
+  const isDifferential = plan.scopeMode === "differential";
   const inputExpr = target.fuzzInputKind === "bytes" ? "data" : "string(data)";
   const functionName = `Fuzz${toPascalCase(plan.slug)}`;
   const needsContext = target.argCount === 2;
@@ -132,14 +133,16 @@ function buildReadyGoHarness(plan: CampaignPlan): string {
         ? `${inputExpr}, context.Background()`
         : inputExpr;
 
+  const oracleImports = isDifferential
+    ? ['  "bytes"', '  "os"', '  "os/exec"']
+    : [];
+
   return [
     "package fuzzcampaign",
     "",
     "import (",
-    '  "bytes"',
     ...(needsContext ? ['  "context"'] : []),
-    '  "os"',
-    '  "os/exec"',
+    ...oracleImports,
     '  "reflect"',
     '  "testing"',
     "",
@@ -151,16 +154,22 @@ function buildReadyGoHarness(plan: CampaignPlan): string {
     '  f.Add([]byte("[]"))',
     "",
     "  f.Fuzz(func(t *testing.T, data []byte) {",
-    `    accepted, valueText := callTarget(targetpkg.${target.symbol}, ${args})`,
-    "    oracleAccepted, oracleOutput := runOracleCLI(t, data)",
-    "",
-    '    if oracleConfigured() && accepted != oracleAccepted {',
-    '      t.Fatalf("acceptance mismatch: target=%v oracle=%v input=%q", accepted, oracleAccepted, data)',
-    "    }",
-    "",
-    '    if oracleConfigured() && valueText != "" && oracleOutput != "" && valueText != oracleOutput {',
-    '      t.Fatalf("output mismatch: target=%q oracle=%q input=%q", valueText, oracleOutput, data)',
-    "    }",
+    ...(isDifferential
+      ? [
+          `    accepted, valueText := callTarget(targetpkg.${target.symbol}, ${args})`,
+          "    if oracleConfigured() {",
+          "      oracleAccepted, oracleOutput := runOracleCLI(t, data)",
+          "",
+          "      if accepted != oracleAccepted {",
+          '        t.Fatalf("acceptance mismatch: target=%v oracle=%v input=%q", accepted, oracleAccepted, data)',
+          "      }",
+          "",
+          '      if valueText != "" && oracleOutput != "" && valueText != oracleOutput {',
+          '        t.Fatalf("output mismatch: target=%q oracle=%q input=%q", valueText, oracleOutput, data)',
+          "      }",
+          "    }",
+        ]
+      : [`    _, _ = callTarget(targetpkg.${target.symbol}, ${args})`]),
     "  })",
     "}",
     "",
@@ -190,25 +199,29 @@ function buildReadyGoHarness(plan: CampaignPlan): string {
     "  return accepted, valueText",
     "}",
     "",
-    "func runOracleCLI(t *testing.T, data []byte) (bool, string) {",
-    '  oracleBin := os.Getenv("BRRRSENTRY_ORACLE_BIN")',
-    '  if oracleBin == "" {',
-    '    return false, ""',
-    "  }",
-    "",
-    "  cmd := exec.Command(oracleBin)",
-    "  cmd.Stdin = bytes.NewReader(data)",
-    "  output, err := cmd.CombinedOutput()",
-    "  if err != nil {",
-    "    return false, string(output)",
-    "  }",
-    "  return true, string(output)",
-    "}",
-    "",
-    "func oracleConfigured() bool {",
-    '  return os.Getenv("BRRRSENTRY_ORACLE_BIN") != ""',
-    "}",
-    "",
+    ...(isDifferential
+      ? [
+          "func runOracleCLI(t *testing.T, data []byte) (bool, string) {",
+          '  oracleBin := os.Getenv("BRRRSENTRY_ORACLE_BIN")',
+          '  if oracleBin == "" {',
+          '    return false, ""',
+          "  }",
+          "",
+          "  cmd := exec.Command(oracleBin)",
+          "  cmd.Stdin = bytes.NewReader(data)",
+          "  output, err := cmd.CombinedOutput()",
+          "  if err != nil {",
+          "    return false, string(output)",
+          "  }",
+          "  return true, string(output)",
+          "}",
+          "",
+          "func oracleConfigured() bool {",
+          '  return os.Getenv("BRRRSENTRY_ORACLE_BIN") != ""',
+          "}",
+          "",
+        ]
+      : []),
   ].join("\n");
 }
 
