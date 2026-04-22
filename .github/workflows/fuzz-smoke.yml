@@ -1,0 +1,53 @@
+name: Fuzz Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  gosentry-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Go (bootstrap)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+
+      - name: Install
+        run: npm ci
+
+      - name: Build brrrsentry
+        run: npm run build
+
+      - name: Build gosentry (linux)
+        run: |
+          cd third_party/gosentry/src
+          ./make.bash
+
+      - name: Run gosentry smoke
+        run: node scripts/ci/gosentry-smoke.mjs | tee /tmp/gosentry-smoke.txt
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "### gosentry smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f /tmp/gosentry-smoke.txt ]]; then
+            sed -e 's/\r$//' /tmp/gosentry-smoke.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "(no output captured)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+

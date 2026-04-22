@@ -24,6 +24,11 @@ auto-judge pass to classify false positives. If it is a harness issue, it
 applies a minimal fix to the generated harness (not the target repo code) and
 auto-reruns the fuzzer once with the same cores.
 
+If auto-judge says the finding is a real bug (`verdict=real_bug`), brrrsentry:
+
+1. appends a triage section to `FOUND_ISSUES.md`
+2. shows a blocking "Bug Alert" modal in the TUI
+
 ## What it looks for
 
 Target discovery is agentic now. `brrrsentry` builds a local file inventory and
@@ -90,6 +95,25 @@ node dist/index.js /path/to/target-repo
 | `--gosentry-path <path>` | Override the gosentry root path | `third_party/gosentry` |
 | `--model <model>` | Model for discovery and planning | `gpt-5.2` |
 | `--reasoning-effort <effort>` | Reasoning effort | `xhigh` |
+
+## CI / CD
+
+We keep 3 end-to-end cases green:
+
+1. CI builds gosentry (linux), runs a short fuzzing smoke, and expects at least one crash.
+2. A harness logic bug produces a false positive, auto-judge returns a harness fix, and brrrsentry auto-reruns once.
+3. A real target bug triggers triage and shows a blocking alert in the TUI.
+
+GitHub Actions:
+
+1. `.github/workflows/ci.yml` runs TypeScript typecheck + TUI scenario tests.
+2. `.github/workflows/fuzz-smoke.yml` (scheduled + manual) builds gosentry on linux and runs `scripts/ci/gosentry-smoke.mjs`.
+
+Local:
+
+```bash
+npm test
+```
 
 ## Model calls
 

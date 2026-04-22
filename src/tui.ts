@@ -34,6 +34,44 @@ type StepName = "mode" | "scope" | "target" | "review" | "result" | "run";
 
 type FindingKind = "crash" | "hang" | "race" | "leak";
 
+type AutoJudgeResult = Awaited<ReturnType<typeof autoJudgeFindingWithOpenAI>>;
+
+type TuiServices = {
+  buildReadyGoHarness: typeof buildReadyGoHarness;
+  canAutoWireGoHarness: typeof canAutoWireGoHarness;
+  createFallbackPlan: typeof createFallbackPlan;
+  writeCampaign: typeof writeCampaign;
+  buildRepositoryDiscoveryContext: typeof buildRepositoryDiscoveryContext;
+  discoverTargetsWithOpenAI: typeof discoverTargetsWithOpenAI;
+  draftGoHarnessWithOpenAI: typeof draftGoHarnessWithOpenAI;
+  repairGoHarnessWithOpenAI: typeof repairGoHarnessWithOpenAI;
+  buildCampaignPlanWithOpenAI: typeof buildCampaignPlanWithOpenAI;
+  autoJudgeFindingWithOpenAI: typeof autoJudgeFindingWithOpenAI;
+  spawnStreaming: typeof spawnStreaming;
+};
+
+export type TuiDriverScript = {
+  fuzzMode?: FuzzMode;
+  scopeMode?: ScopeMode;
+  targetIndex?: number;
+  afterResult?: "run" | "done";
+  runCores?: string;
+  quitAfterRun?: boolean;
+  dismissAlerts?: boolean;
+};
+
+export type RunTuiOptions = {
+  io?: {
+    input?: NodeJS.ReadableStream;
+    output?: NodeJS.WritableStream;
+  };
+  services?: Partial<TuiServices>;
+  driver?: TuiDriverScript;
+  hooks?: {
+    onAlert?: (alert: { kind: "info" | "warn" | "error"; title: string; body: string }) => void;
+  };
+};
+
 interface FuzzFinding {
   kind: FindingKind;
   path: string;
@@ -255,13 +293,36 @@ async function collectFindings(
   return findings;
 }
 
-export async function runTui(config: AppConfig): Promise<void> {
+export async function runTui(config: AppConfig, options?: RunTuiOptions): Promise<void> {
   const prompts = await loadPromptSources(config.repoRoot);
+  const services: TuiServices = {
+    buildReadyGoHarness: options?.services?.buildReadyGoHarness ?? buildReadyGoHarness,
+    canAutoWireGoHarness: options?.services?.canAutoWireGoHarness ?? canAutoWireGoHarness,
+    createFallbackPlan: options?.services?.createFallbackPlan ?? createFallbackPlan,
+    writeCampaign: options?.services?.writeCampaign ?? writeCampaign,
+    buildRepositoryDiscoveryContext:
+      options?.services?.buildRepositoryDiscoveryContext ?? buildRepositoryDiscoveryContext,
+    discoverTargetsWithOpenAI:
+      options?.services?.discoverTargetsWithOpenAI ?? discoverTargetsWithOpenAI,
+    draftGoHarnessWithOpenAI:
+      options?.services?.draftGoHarnessWithOpenAI ?? draftGoHarnessWithOpenAI,
+    repairGoHarnessWithOpenAI:
+      options?.services?.repairGoHarnessWithOpenAI ?? repairGoHarnessWithOpenAI,
+    buildCampaignPlanWithOpenAI:
+      options?.services?.buildCampaignPlanWithOpenAI ?? buildCampaignPlanWithOpenAI,
+    autoJudgeFindingWithOpenAI:
+      options?.services?.autoJudgeFindingWithOpenAI ?? autoJudgeFindingWithOpenAI,
+    spawnStreaming: options?.services?.spawnStreaming ?? spawnStreaming,
+  };
+
   const state: AppState = { step: "mode" };
   const inputUnlockDelayMs = 160;
   const statusFlowMaxChars = 280;
 
   const screen = blessed.screen({
+    input: options?.io?.input as any,
+    output: options?.io?.output as any,
+    terminal: options?.io ? "ansi" : undefined,
     smartCSR: true,
     fullUnicode: true,
     title: "brrrsentry",
@@ -386,6 +447,21 @@ export async function runTui(config: AppConfig): Promise<void> {
     style: { border: { fg: "magenta" } },
   });
 
+  const alertMessage = blessed.message({
+    parent: screen,
+    top: "center",
+    left: "center",
+    width: "80%",
+    height: "shrink",
+    border: "line",
+    label: " Alert ",
+    tags: true,
+    hidden: true,
+    keys: true,
+    vi: true,
+    style: { border: { fg: "red" } },
+  });
+
   const spinnerFrames = ["|", "/", "-", "\\"];
   let spinnerTimer: NodeJS.Timeout | undefined;
   let modelProgressTimer: NodeJS.Timeout | undefined;
@@ -408,6 +484,158 @@ export async function runTui(config: AppConfig): Promise<void> {
   const outputStdoutLines: string[] = [];
   const outputStdoutTailLimit = 900;
   const outputStdoutRenderLimit = 320;
+
+  const driver = options?.driver;
+  let driverTimer: NodeJS.Timeout | undefined;
+
+  function driverWrite(data: string): void {
+    const input = options?.io?.input as any;
+    if (input && typeof input.write === "function") {
+      input.write(data);
+    }
+  }
+
+  function stopDriver(): void {
+    if (driverTimer) {
+      clearInterval(driverTimer);
+      driverTimer = undefined;
+    }
+  }
+
+  function startDriver(): void {
+    if (!driver || driverTimer) {
+      return;
+    }
+
+    const tick = () => {
+      if (!driver) {
+        return;
+      }
+
+      if (driver.dismissAlerts && !alertMessage.hidden) {
+        driverWrite("\n");
+        return;
+      }
+
+      if (inputLocked) {
+        return;
+      }
+
+      if (state.step === "mode") {
+        const desired = driver.fuzzMode ?? "byte";
+        const index = modeChoices.findIndex((choice) => choice.key === desired);
+        list.select(Math.max(0, index));
+        (list as any).enterSelected();
+        return;
+      }
+
+      if (state.step === "scope") {
+        const desired = driver.scopeMode ?? "narrow";
+        const index = scopeChoices.findIndex((choice) => choice.key === desired);
+        list.select(Math.max(0, index));
+        (list as any).enterSelected();
+        return;
+      }
+
+      if (state.step === "target") {
+        const index = Math.max(0, driver.targetIndex ?? 0);
+        list.select(index);
+        (list as any).enterSelected();
+        return;
+      }
+
+      if (state.step === "review") {
+        list.select(0);
+        (list as any).enterSelected();
+        return;
+      }
+
+      if (state.step === "result") {
+        const after = driver.afterResult ?? "done";
+        list.select(after === "run" ? 0 : 1);
+        (list as any).enterSelected();
+        return;
+      }
+
+      if (
+        state.step === "run" &&
+        driver.quitAfterRun &&
+        !state.fuzzRunning &&
+        !activeFuzz &&
+        state.runFindings &&
+        (state.runFindings.length === 0 || Boolean(state.runAutoJudge))
+      ) {
+        driverWrite("q");
+      }
+    };
+
+    driverTimer = setInterval(tick, 60);
+  }
+
+  function truncateForAlert(text: string, maxChars: number): string {
+    const normalized = text.replace(/\r/g, "").trim();
+    if (normalized.length <= maxChars) {
+      return normalized;
+    }
+    return `${normalized.slice(0, maxChars).trimEnd()}\n... (truncated)`;
+  }
+
+  async function showAlert(
+    kind: "info" | "warn" | "error",
+    title: string,
+    body: string,
+  ): Promise<void> {
+    options?.hooks?.onAlert?.({ kind, title, body });
+
+    const borderColor =
+      kind === "error" ? "red" : kind === "warn" ? "yellow" : "cyan";
+
+    alertMessage.style.border = { fg: borderColor };
+    alertMessage.setLabel(` ${title} `);
+
+    const safeBody = blessed.escape(body);
+    const content = truncateForAlert(safeBody, 1800);
+
+    await new Promise<void>((resolve) => {
+      alertMessage.display(content, 0, () => resolve());
+    });
+  }
+
+  async function recordRealBug(params: {
+    plan: CampaignPlan;
+    generated: GeneratedCampaign;
+    findings: FuzzFinding[];
+    judge: AutoJudgeResult;
+    runCommand?: string;
+    libAflOutputDir?: string;
+  }): Promise<void> {
+    const timestamp = new Date().toISOString();
+    const lines: string[] = [];
+
+    lines.push("");
+    lines.push("");
+    lines.push(`## ${timestamp} - ${params.plan.target.symbol}`);
+    lines.push("");
+    lines.push(`- verdict: ${params.judge.verdict}`);
+    lines.push(`- root cause: ${params.judge.root_cause}`);
+    if (params.runCommand) {
+      lines.push(`- command: ${params.runCommand}`);
+    }
+    if (params.libAflOutputDir) {
+      lines.push(`- libafl output: ${params.libAflOutputDir}`);
+    }
+    lines.push("");
+    lines.push("Findings:");
+    for (const finding of params.findings) {
+      lines.push(`- ${finding.kind}: ${finding.path}`);
+    }
+    lines.push("");
+    lines.push("Triage reason:");
+    lines.push(params.judge.reason.trim().length > 0 ? params.judge.reason.trim() : "(empty)");
+    lines.push("");
+
+    await fs.appendFile(params.generated.issuesPath, lines.join("\n"));
+  }
 
   function stopSpinner(): void {
     if (spinnerTimer) {
@@ -931,7 +1159,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       "Local discovery: file inventory + previews",
     );
     pushLog("Building repository context for model discovery...");
-    const discoveryContext = await buildRepositoryDiscoveryContext(config.targetDir, {
+    const discoveryContext = await services.buildRepositoryDiscoveryContext(config.targetDir, {
       onProgress: (message) => {
         setStatusDetailLine(message);
         pushLog(`Local discovery: ${message}`);
@@ -967,7 +1195,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       ]);
 
       try {
-        state.discovery = await discoverTargetsWithOpenAI(
+        state.discovery = await services.discoverTargetsWithOpenAI(
           config,
           discoveryContext,
           prompts,
@@ -1001,7 +1229,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     const skippedTargets: string[] = [];
 
     for (const candidate of state.discovery.candidates) {
-      if (!canAutoWireGoHarness(candidate)) {
+      if (!services.canAutoWireGoHarness(candidate)) {
         skippedTargets.push(`${candidate.symbol} (${candidate.relativePath}): needs custom harness`);
         continue;
       }
@@ -1010,8 +1238,8 @@ export async function runTui(config: AppConfig): Promise<void> {
         continue;
       }
 
-      const plan = createFallbackPlan(candidate, state.fuzzMode!, state.scopeMode!);
-      const harnessSource = buildReadyGoHarness(plan);
+      const plan = services.createFallbackPlan(candidate, state.fuzzMode!, state.scopeMode!);
+      const harnessSource = services.buildReadyGoHarness(plan);
       const compilation = await compileGoHarness({
         moduleName: candidate.moduleName,
         moduleRoot: candidate.moduleRoot,
@@ -1120,7 +1348,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       await fs.writeFile(path.join(tempDir, "harness_test.go"), params.harnessSource);
 
       const outputLines: string[] = [];
-      const run = spawnStreaming("go", ["test", "-c"], {
+      const run = services.spawnStreaming("go", ["test", "-c"], {
         cwd: tempDir,
         env: process.env,
         onLine: (line) => outputLines.push(line),
@@ -1148,9 +1376,9 @@ export async function runTui(config: AppConfig): Promise<void> {
       throw new Error("missing Go import path for selected target");
     }
 
-    if (canAutoWireGoHarness(plan.target)) {
+    if (services.canAutoWireGoHarness(plan.target)) {
       setStatusFlow("building ready harness");
-      const harnessSource = buildReadyGoHarness(plan);
+      const harnessSource = services.buildReadyGoHarness(plan);
 
       setStatusFlow("compiling harness");
       const compilation = await compileGoHarness({
@@ -1167,7 +1395,7 @@ export async function runTui(config: AppConfig): Promise<void> {
 
     const snippet = await readTargetSnippet(plan.target);
     setStatusFlow("drafting harness JSON");
-    let { harnessSource } = await draftGoHarnessWithOpenAI(
+    let { harnessSource } = await services.draftGoHarnessWithOpenAI(
       config,
       prompts,
       { plan, targetFileSnippet: snippet },
@@ -1197,7 +1425,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       }
 
       setStatusFlow("fixing harness compile error");
-      const repaired = await repairGoHarnessWithOpenAI(
+      const repaired = await services.repairGoHarnessWithOpenAI(
         config,
         prompts,
         {
@@ -1238,7 +1466,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       "validating plan JSON",
     ]);
 
-    let plan = createFallbackPlan(target, state.fuzzMode, state.scopeMode);
+    let plan = services.createFallbackPlan(target, state.fuzzMode, state.scopeMode);
 
     try {
       state.draftedHarnessSource = await draftRunnableHarness(plan);
@@ -1251,7 +1479,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     }
 
     try {
-      const enriched = await buildCampaignPlanWithOpenAI(
+      const enriched = await services.buildCampaignPlanWithOpenAI(
         config,
         prompts,
         target,
@@ -1287,7 +1515,7 @@ export async function runTui(config: AppConfig): Promise<void> {
 
     startSpinner("Writing campaign workspace", `.brrrsentry/campaigns/${state.plan.slug}`);
     pushLog("Writing campaign workspace...");
-    state.generated = await writeCampaign(
+    state.generated = await services.writeCampaign(
       config,
       state.plan,
       {
@@ -1354,7 +1582,7 @@ export async function runTui(config: AppConfig): Promise<void> {
     pushFlow("");
     pushFlow(`# gosentry missing; running ./make.bash in ${gosentrySrcDir}`);
 
-    const build = spawnStreaming("./make.bash", [], {
+    const build = services.spawnStreaming("./make.bash", [], {
       cwd: gosentrySrcDir,
       env: process.env,
       onLine: (line) => {
@@ -1392,6 +1620,10 @@ export async function runTui(config: AppConfig): Promise<void> {
   }
 
   async function promptRunCores(): Promise<string | null> {
+    if (driver?.runCores) {
+      return driver.runCores;
+    }
+
     const suggested = Math.min(os.cpus().length, 4);
     const defaultValue = state.runCores ?? String(Math.max(1, suggested));
 
@@ -1457,7 +1689,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       setStatus(attempt === 1 ? "Fuzzing" : "Re-running fuzzing", `cores=${cores}`);
       redraw();
 
-      activeFuzz = spawnStreaming("./fuzz.bash", [], {
+      activeFuzz = services.spawnStreaming("./fuzz.bash", [], {
         cwd: state.generated.rootDir,
         env: {
           ...process.env,
@@ -1487,6 +1719,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       if (quitAfterFuzzStops) {
         stopSpinner();
         clearInputUnlockTimer();
+        stopDriver();
         screen.destroy();
         return;
       }
@@ -1536,7 +1769,7 @@ export async function runTui(config: AppConfig): Promise<void> {
       const harnessSource = await fs.readFile(generated.harnessPath, "utf8");
       const judgeResult = await (async () => {
         try {
-          const result = await autoJudgeFindingWithOpenAI(
+          const result = await services.autoJudgeFindingWithOpenAI(
             config,
             prompts,
             {
@@ -1580,6 +1813,63 @@ export async function runTui(config: AppConfig): Promise<void> {
         pushFlow("");
         pushFlow(`$ ${state.runCommand}  # auto-rerun after harness fix`);
         continue;
+      }
+
+      if (judgeResult.verdict === "real_bug") {
+        try {
+          await recordRealBug({
+            plan,
+            generated,
+            findings: runFindings,
+            judge: judgeResult,
+            runCommand: state.runCommand,
+            libAflOutputDir: state.runLibAflOutputDir,
+          });
+          pushFlow("");
+          pushFlow(`Recorded finding in ${generated.issuesPath}`);
+        } catch (error) {
+          pushFlow("");
+          pushFlow(`Failed to record finding: ${(error as Error).message}`);
+        }
+
+        const alertLines: string[] = [
+          "Fuzzing found a real bug.",
+          "",
+          `Target: ${plan.target.symbol}`,
+          `Verdict: ${judgeResult.verdict}`,
+          `Root cause: ${judgeResult.root_cause}`,
+          "",
+          "Reason:",
+          judgeResult.reason.trim().length > 0 ? judgeResult.reason.trim() : "(empty)",
+          "",
+          "Findings:",
+          ...runFindings.slice(0, 10).map((finding) => `- ${finding.kind}: ${finding.path}`),
+          "",
+          "Next:",
+          `- Review ${generated.issuesPath}`,
+          `- Re-run: ${state.runCommand ?? "(unknown)"}`,
+        ];
+
+        await showAlert("error", "Bug Alert", alertLines.join("\n"));
+      } else if (judgeResult.verdict === "unclear") {
+        const alertLines: string[] = [
+          "Fuzzing found something, but triage is unclear.",
+          "",
+          `Target: ${plan.target.symbol}`,
+          `Verdict: ${judgeResult.verdict}`,
+          `Root cause: ${judgeResult.root_cause}`,
+          "",
+          "Reason:",
+          judgeResult.reason.trim().length > 0 ? judgeResult.reason.trim() : "(empty)",
+          "",
+          "Findings:",
+          ...runFindings.slice(0, 10).map((finding) => `- ${finding.kind}: ${finding.path}`),
+          "",
+          "Next:",
+          `- Inspect the crash inputs under ${state.runLibAflOutputDir ?? "(unknown)"}`,
+        ];
+
+        await showAlert("warn", "Triage Alert", alertLines.join("\n"));
       }
 
       redraw();
@@ -1660,6 +1950,7 @@ export async function runTui(config: AppConfig): Promise<void> {
         }
         stopSpinner();
         clearInputUnlockTimer();
+        stopDriver();
         shouldUnlock = false;
         screen.destroy();
       }
@@ -1736,10 +2027,19 @@ export async function runTui(config: AppConfig): Promise<void> {
 
     stopSpinner();
     clearInputUnlockTimer();
+    stopDriver();
     screen.destroy();
   });
 
   setStatus("Ready");
   redraw();
   list.focus();
+  startDriver();
+
+  await new Promise<void>((resolve) => {
+    screen.once("destroy", () => {
+      stopDriver();
+      resolve();
+    });
+  });
 }
