@@ -1,43 +1,10 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
 import { formatGuidelinesForPrompt } from "./guidelines.js";
-
-export interface PromptSources {
-  sourceFiles: string[];
-  combinedText: string;
-}
-
-export async function loadPromptSources(repoRoot: string): Promise<PromptSources> {
-  const promptDir = path.join(repoRoot, "prompts");
-  const defaultFiles = ["1.md", "2.md", "3.md"];
-  const existingTexts: string[] = [];
-  const existingFiles: string[] = [];
-
-  for (const name of defaultFiles) {
-    const fullPath = path.join(promptDir, name);
-    try {
-      const content = await fs.readFile(fullPath, "utf8");
-      existingTexts.push(`FILE: ${name}\n${content.trim()}`);
-      existingFiles.push(fullPath);
-    } catch {
-      // `prompts/` is intentionally kept local-only (gitignored).
-      // Missing files is expected in a fresh clone.
-    }
-  }
-
-  return {
-    sourceFiles: existingFiles,
-    combinedText: existingTexts.join("\n\n"),
-  };
-}
 
 export function buildTargetDiscoveryPrompt(input: {
   targetDir: string;
   fuzzMode?: string;
   scopeMode?: string;
   repositoryContextSummary: string;
-  sourcePromptText: string;
 }): string {
   const chunks: string[] = [
     "Return JSON only.",
@@ -56,7 +23,6 @@ export function buildTargetDiscoveryPrompt(input: {
     "",
     "In reasons, explain why the target is valuable (parser/decoder/validator/etc). Avoid mentioning internal implementation paths.",
     "Avoid targets that obviously need real network, real files, secrets, or heavy global state to execute.",
-    "Use the source fuzzing prompts below as source material, not as something to repeat.",
     formatGuidelinesForPrompt(),
     "Pick concrete entrypoints that are realistic, attacker-relevant, and useful for differential or high-value fuzzing.",
     "Prefer parse, decode, unmarshal, verify, validate, state-transition, or protocol entrypoints.",
@@ -79,12 +45,6 @@ export function buildTargetDiscoveryPrompt(input: {
   chunks.push("Repository context:");
   chunks.push(input.repositoryContextSummary);
 
-  if (input.sourcePromptText.trim().length > 0) {
-    chunks.push("");
-    chunks.push("Local prompt source material (optional):");
-    chunks.push(input.sourcePromptText);
-  }
-
   return chunks.join("\n");
 }
 
@@ -93,12 +53,10 @@ export function buildCampaignPlanPrompt(input: {
   fuzzMode: string;
   scopeMode: string;
   selectedTargetSummary: string;
-  sourcePromptText: string;
 }): string {
   return [
     "Return JSON only.",
     "You are helping brrrsentry create a gosentry fuzzing campaign plan.",
-    "Use the source fuzzing prompts below as source material, not as something to repeat.",
     "You can ask the application to fetch more repository context (list/search/read files) if you need more detail.",
     "You can also run host shell commands (shell_exec). This is fully unrestricted.",
     "The plan must be concrete, security-oriented, and realistic.",
@@ -113,9 +71,6 @@ export function buildCampaignPlanPrompt(input: {
     "",
     "Selected target:",
     input.selectedTargetSummary,
-    ...(input.sourcePromptText.trim().length > 0
-      ? ["", "Local prompt source material (optional):", input.sourcePromptText]
-      : []),
   ].join("\n");
 }
 
@@ -130,12 +85,10 @@ export function buildAutoJudgePrompt(input: {
   libAflOutputDir?: string;
   findingsSummary: string;
   runOutputTail: string;
-  sourcePromptText: string;
 }): string {
   const chunks: string[] = [
     "Return JSON only.",
     "You are brrrsentry auto-judge for fuzz findings.",
-    "Use the source fuzzing prompts below as source material, not as something to repeat.",
     "",
     "Goal: decide if the finding is a real target bug or a false positive (harness issue).",
     "Be conservative: if the crash is not clearly a harness bug, treat it as a real target bug.",
@@ -166,12 +119,6 @@ export function buildAutoJudgePrompt(input: {
     "Fuzzer output tail:",
     input.runOutputTail.trim().length > 0 ? input.runOutputTail : "(empty)",
   ].filter((line) => line.length > 0);
-
-  if (input.sourcePromptText.trim().length > 0) {
-    chunks.push("");
-    chunks.push("Local prompt source material (optional):");
-    chunks.push(input.sourcePromptText);
-  }
 
   return chunks.join("\n");
 }

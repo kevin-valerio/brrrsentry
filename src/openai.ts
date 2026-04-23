@@ -9,7 +9,6 @@ import {
   buildAutoJudgePrompt,
   buildCampaignPlanPrompt,
   buildTargetDiscoveryPrompt,
-  type PromptSources,
 } from "./prompts.js";
 import {
   hydrateDiscoveredTargets,
@@ -762,7 +761,6 @@ export function isOpenAIReady(config: AppConfig): boolean {
 export async function discoverTargetsWithOpenAI(
   config: AppConfig,
   discoveryContext: RepositoryDiscoveryContext,
-  prompts: PromptSources,
   context?: { fuzzMode?: FuzzMode; scopeMode?: ScopeMode },
   callbacks?: ModelProgressCallbacks,
 ): Promise<DiscoveryResult> {
@@ -771,7 +769,6 @@ export async function discoverTargetsWithOpenAI(
     fuzzMode: context?.fuzzMode,
     scopeMode: context?.scopeMode,
     repositoryContextSummary: summarizeRepositoryContext(discoveryContext),
-    sourcePromptText: prompts.combinedText,
   });
 
   const payload = await createToolCallingJsonResponse<{
@@ -798,7 +795,6 @@ export async function discoverTargetsWithOpenAI(
 
 export async function buildCampaignPlanWithOpenAI(
   config: AppConfig,
-  prompts: PromptSources,
   target: CandidateTarget,
   fuzzMode: FuzzMode,
   scopeMode: ScopeMode,
@@ -809,7 +805,6 @@ export async function buildCampaignPlanWithOpenAI(
     fuzzMode,
     scopeMode,
     selectedTargetSummary: summarizeTarget(target),
-    sourcePromptText: prompts.combinedText,
   });
 
   const payload = await createToolCallingJsonResponse<{
@@ -852,7 +847,6 @@ export async function buildCampaignPlanWithOpenAI(
 
 export async function draftGoHarnessWithOpenAI(
   config: AppConfig,
-  prompts: PromptSources,
   input: {
     plan: CampaignPlan;
     targetFileSnippet: string;
@@ -898,9 +892,6 @@ export async function draftGoHarnessWithOpenAI(
     "",
     "Target file snippet (may be incomplete):",
     input.targetFileSnippet.trim().length > 0 ? input.targetFileSnippet : "(empty)",
-    ...(prompts.combinedText.trim().length > 0
-      ? ["", "Local prompt source material (optional):", prompts.combinedText]
-      : []),
   ].join("\n");
 
   const payload = await createToolCallingJsonResponse<{
@@ -916,7 +907,6 @@ export async function draftGoHarnessWithOpenAI(
 
 export async function repairGoHarnessWithOpenAI(
   config: AppConfig,
-  prompts: PromptSources,
   input: {
     plan: CampaignPlan;
     targetFileSnippet: string;
@@ -964,9 +954,6 @@ export async function repairGoHarnessWithOpenAI(
     "",
     "Go build error output:",
     input.buildError.trim().length > 0 ? input.buildError : "(empty)",
-    ...(prompts.combinedText.trim().length > 0
-      ? ["", "Local prompt source material (optional):", prompts.combinedText]
-      : []),
   ].join("\n");
 
   const payload = await createToolCallingJsonResponse<{
@@ -982,7 +969,6 @@ export async function repairGoHarnessWithOpenAI(
 
 export async function autoJudgeFindingWithOpenAI(
   config: AppConfig,
-  prompts: PromptSources,
   input: {
     plan: CampaignPlan;
     campaignRoot: string;
@@ -1010,7 +996,6 @@ export async function autoJudgeFindingWithOpenAI(
     libAflOutputDir: input.libAflOutputDir,
     findingsSummary,
     runOutputTail: input.runOutputTail,
-    sourcePromptText: prompts.combinedText,
   });
 
   const payload = await createJsonResponse<{

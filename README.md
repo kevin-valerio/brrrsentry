@@ -139,15 +139,10 @@ The default gosentry root is `third_party/gosentry`. Override it with
 Generated `fuzz.bash` expects a built gosentry `bin/go`.
 When you run from inside the TUI (Run now), brrrsentry will build gosentry automatically if `bin/go` is missing.
 
-## Local prompt material
+## Campaign rules
 
-If you keep local fuzzing prompt material, place it in `prompts/1.md`,
-`prompts/2.md`, and `prompts/3.md`.
+Core campaign rules come from `src/guidelines.ts`.
 
-`brrrsentry` uses that material only as extra source context for model-backed
-discovery and planning. Core campaign rules still come from
-`src/guidelines.ts`.
-
-Those core rules include things like: gosentry is required, use Go vs Go (or
+These rules include things like: gosentry is required, use Go vs Go (or
 Go vs X) harnesses, pick a clear oracle/source-of-truth for differential checks,
 use tests/specs to stay realistic, and avoid admin-only/key-compromise targets.

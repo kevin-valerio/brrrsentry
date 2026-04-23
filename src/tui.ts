@@ -17,7 +17,6 @@ import {
   draftGoHarnessWithOpenAI,
   repairGoHarnessWithOpenAI,
 } from "./openai.js";
-import { loadPromptSources } from "./prompts.js";
 import { FUZZING_GUIDELINES } from "./guidelines.js";
 import { spawnStreaming, type SpawnStreamingResult } from "./process.js";
 import type {
@@ -294,7 +293,6 @@ async function collectFindings(
 }
 
 export async function runTui(config: AppConfig, options?: RunTuiOptions): Promise<void> {
-  const prompts = await loadPromptSources(config.repoRoot);
   const services: TuiServices = {
     buildReadyGoHarness: options?.services?.buildReadyGoHarness ?? buildReadyGoHarness,
     canAutoWireGoHarness: options?.services?.canAutoWireGoHarness ?? canAutoWireGoHarness,
@@ -1198,7 +1196,6 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
         state.discovery = await services.discoverTargetsWithOpenAI(
           config,
           discoveryContext,
-          prompts,
           {
             fuzzMode: state.fuzzMode,
             scopeMode: state.scopeMode,
@@ -1397,7 +1394,6 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
     setStatusFlow("drafting harness JSON");
     let { harnessSource } = await services.draftGoHarnessWithOpenAI(
       config,
-      prompts,
       { plan, targetFileSnippet: snippet },
       {
         onReasoningSummary: setThinkingReasoningSummary,
@@ -1427,7 +1423,6 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
       setStatusFlow("fixing harness compile error");
       const repaired = await services.repairGoHarnessWithOpenAI(
         config,
-        prompts,
         {
           plan,
           targetFileSnippet: snippet,
@@ -1481,7 +1476,6 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
     try {
       const enriched = await services.buildCampaignPlanWithOpenAI(
         config,
-        prompts,
         target,
         state.fuzzMode,
         state.scopeMode,
@@ -1771,7 +1765,6 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
         try {
           const result = await services.autoJudgeFindingWithOpenAI(
             config,
-            prompts,
             {
               plan,
               campaignRoot: generated.rootDir,

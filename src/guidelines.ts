@@ -3,9 +3,7 @@ export interface GuidelineSection {
   bullets: string[];
 }
 
-// These guidelines are extracted from the local `prompts/*.md` source material.
-// They are tracked in code so brrrsentry keeps the constraints even when
-// `prompts/` is kept local-only (gitignored).
+// These guidelines are tracked in code so brrrsentry keeps core constraints stable.
 export const FUZZING_GUIDELINES: GuidelineSection[] = [
   {
     title: "Tooling (gosentry required)",

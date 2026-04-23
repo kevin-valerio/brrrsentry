@@ -22,7 +22,6 @@ Current product decisions
 - Default model is `gpt-5.2`
 - Default reasoning effort is `xhigh`
 - CLI flags must be able to override model, reasoning, and gosentry path
-- Prompt files in `prompts/` are source material; do not blindly paste them as runtime prompts
 - Generated artifacts must live inside the target repo under `.brrrsentry/`
 - gosentry is vendored as a git submodule, but runtime must also allow a path override
 - The app must ask before starting a real fuzzing campaign
@@ -44,7 +43,6 @@ Repository map
 
 - `src/` contains the TypeScript application
 - `docs/` contains project notes and tool decisions
-- `prompts/` contains the user-provided fuzzing source prompts
 - `third_party/gosentry/` is the gosentry submodule
 
 Near-term focus
