@@ -16,7 +16,6 @@ func Parse(data []byte) (string, error) {
 		return "", errors.New("expected JSON string")
 	}
 
-	// BUG: deliberate crash for grammar fuzzing.
 	if s == "abba" {
 		panic("boom")
 	}

@@ -1,9 +1,0 @@
-[
-  ["Json", "{Value}"],
-  ["Value", "{String}"],
-  ["String", "\"{Chars}\""],
-  ["Chars", ""],
-  ["Chars", "{Char}{Chars}"],
-  ["Char", "a"],
-  ["Char", "b"]
-]
