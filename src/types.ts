@@ -83,4 +83,5 @@ export interface GeneratedCampaign {
   issuesPath: string;
   fuzzScriptPath: string;
   harnessPath: string;
+  grammarPath: string;
 }

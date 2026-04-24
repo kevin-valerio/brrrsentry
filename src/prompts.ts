@@ -122,3 +122,53 @@ export function buildAutoJudgePrompt(input: {
 
   return chunks.join("\n");
 }
+
+export function buildNautilusGrammarPrompt(input: {
+  targetDir: string;
+  fuzzMode: string;
+  scopeMode: string;
+  selectedTargetSummary: string;
+  harnessSource: string;
+  targetFileSnippet: string;
+}): string {
+  return [
+    "Return JSON only.",
+    "You are helping brrrsentry generate the grammar part of a complete gosentry campaign.",
+    "The fuzz mode is grammar, so the campaign is incomplete unless it has a target-specific Nautilus JSON grammar.",
+    "",
+    "Nautilus grammar requirements:",
+    "- Output a JSON array of rules in the grammar field.",
+    "- Each rule is a 2-item array: [\"NonTerm\", \"RHS\"].",
+    "- Nonterminal names must start with a capital letter.",
+    "- Use {NonTerm} in RHS to reference another rule.",
+    "- Literal braces must be escaped as \\\\{ and \\\\}.",
+    "- The first rule's nonterminal is the start symbol.",
+    "- Grammar mode still generates bytes/strings. The harness converts those into target inputs.",
+    "",
+    "Campaign quality requirements:",
+    "- The grammar must fit the target input language or format.",
+    "- Prefer realistic attacker-reachable inputs, not deep internal encodings.",
+    "- Use target tests, examples, and specs when available.",
+    "- Include enough structure to reach meaningful parser or state-transition logic.",
+    "- Keep the grammar small enough for a first fuzzing campaign.",
+    formatGuidelinesForPrompt(),
+    "",
+    "Example Nautilus grammar for a tiny JSON string subset:",
+    '[["Json","{Value}"],["Value","{String}"],["String","\\\"{Chars}\\\""],["Chars",""],["Chars","{Char}{Chars}"],["Char","a"],["Char","b"]]',
+    "",
+    'JSON format: {"grammar":[["Json","{Value}"]],"notes":["why this grammar fits the target"]}',
+    "",
+    `Target directory: ${input.targetDir}`,
+    `Selected fuzz mode: ${input.fuzzMode}`,
+    `Selected scope mode: ${input.scopeMode}`,
+    "",
+    "Selected target:",
+    input.selectedTargetSummary,
+    "",
+    "Generated harness source:",
+    input.harnessSource.trim().length > 0 ? input.harnessSource : "(empty)",
+    "",
+    "Target file snippet:",
+    input.targetFileSnippet.trim().length > 0 ? input.targetFileSnippet : "(empty)",
+  ].join("\n");
+}

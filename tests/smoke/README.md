@@ -12,5 +12,5 @@ Targets
 | tests/smoke/struct-bug | gosentry struct-aware fuzzing (composite input) | yes (panic) |
 | tests/smoke/race-bug | Data race detector target | yes (race) |
 | tests/smoke/differential-bug | Differential target + oracle CLI | yes (oracle mismatch) |
-| tests/smoke/grammar-json-bug | JSON parser target for grammar fuzzing + a small JSON grammar | yes (panic) |
+| tests/smoke/grammar-json-bug | JSON parser target for app-generated grammar fuzzing | yes (panic) |
 | tests/smoke/end-to-end-bug | Multi-step JSON event handling (end-to-end style) | yes (panic) |

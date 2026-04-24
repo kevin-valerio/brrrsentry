@@ -242,9 +242,9 @@ function buildGrammarJson(plan: CampaignPlan): string {
   );
 }
 
-type NautilusGrammar = Array<[string, string]>;
+export type NautilusGrammar = Array<[string, string]>;
 
-function isNautilusGrammar(value: unknown): value is NautilusGrammar {
+export function isNautilusGrammar(value: unknown): value is NautilusGrammar {
   if (!Array.isArray(value)) {
     return false;
   }
@@ -263,15 +263,27 @@ function isNautilusGrammar(value: unknown): value is NautilusGrammar {
   });
 }
 
+export function formatNautilusGrammarJson(grammar: NautilusGrammar): string {
+  if (!isNautilusGrammar(grammar)) {
+    throw new Error("invalid Nautilus grammar");
+  }
+
+  return `${JSON.stringify(grammar, null, 2)}\n`;
+}
+
+export function normalizeNautilusGrammarJson(input: string): string {
+  const parsed = JSON.parse(input) as unknown;
+  if (!isNautilusGrammar(parsed)) {
+    throw new Error("invalid Nautilus grammar");
+  }
+
+  return formatNautilusGrammarJson(parsed);
+}
+
 async function readNautilusGrammarFile(filePath: string): Promise<string | null> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (!isNautilusGrammar(parsed)) {
-      return null;
-    }
-
-    return `${JSON.stringify(parsed, null, 2)}\n`;
+    return normalizeNautilusGrammarJson(raw);
   } catch {
     return null;
   }
@@ -464,6 +476,7 @@ export async function writeCampaign(
   plan: CampaignPlan,
   module?: { moduleName?: string; moduleRoot?: string },
   harnessSource?: string,
+  grammarSource?: string,
 ): Promise<GeneratedCampaign> {
   const campaignRoot = path.join(
     config.targetDir,
@@ -500,12 +513,20 @@ export async function writeCampaign(
   );
   await fs.writeFile(harnessPath, resolvedHarnessSource);
 
+  const grammarPath = path.join(grammarDir, "grammar.json");
   const grammarRoot = module?.moduleRoot ?? plan.target.moduleRoot ?? config.targetDir;
+  const providedGrammarJson =
+    plan.fuzzMode === "grammar" && grammarSource?.trim()
+      ? normalizeNautilusGrammarJson(grammarSource)
+      : null;
   const grammarJson =
     plan.fuzzMode === "grammar"
-      ? (await detectExistingGrammarJson({ searchRoot: grammarRoot })) ?? buildGrammarJson(plan)
+      ? providedGrammarJson ?? (await detectExistingGrammarJson({ searchRoot: grammarRoot }))
       : buildGrammarJson(plan);
-  await fs.writeFile(path.join(grammarDir, "grammar.json"), grammarJson);
+  if (!grammarJson) {
+    throw new Error("grammar source is missing for grammar mode");
+  }
+  await fs.writeFile(grammarPath, grammarJson);
 
   await fs.writeFile(path.join(corpusDir, "README.md"), plan.corpusIdeas.join("\n"));
   await fs.writeFile(path.join(campaignRoot, "campaign.json"), JSON.stringify(plan, null, 2));
@@ -524,5 +545,6 @@ export async function writeCampaign(
     issuesPath: path.join(campaignRoot, "FOUND_ISSUES.md"),
     fuzzScriptPath: path.join(campaignRoot, "fuzz.bash"),
     harnessPath,
+    grammarPath,
   };
 }

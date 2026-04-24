@@ -14,9 +14,9 @@ function createNullWritable() {
     },
   });
 
-  (sink).isTTY = true;
-  (sink).columns = 120;
-  (sink).rows = 40;
+  sink.isTTY = true;
+  sink.columns = 120;
+  sink.rows = 40;
 
   return sink;
 }
@@ -26,7 +26,7 @@ async function makeTempDir(prefix) {
 }
 
 test(
-  "e2e: panic-bug -> byte/narrow -> run -> Bug Alert",
+  "e2e: grammar-json-bug -> grammar/narrow -> run -> Bug Alert",
   { timeout: 20 * 60_000 },
   async () => {
     if (!process.env.OPENAI_API_KEY) {
@@ -34,20 +34,21 @@ test(
     }
 
     const repoRoot = process.cwd();
-    const fixtureRoot = path.resolve(repoRoot, "tests", "smoke", "panic-bug");
-    const tempRoot = await makeTempDir("brrrsentry-e2e-");
+    const fixtureRoot = path.resolve(repoRoot, "tests", "smoke", "grammar-json-bug");
+    const tempRoot = await makeTempDir("brrrsentry-grammar-e2e-");
     const targetDir = path.join(tempRoot, "target");
+    const generatedGrammar = `${JSON.stringify([["Json", "\"abba\""]], null, 2)}\n`;
+    let grammarGenerationCalled = false;
 
     try {
       await fs.cp(fixtureRoot, targetDir, { recursive: true });
 
       const input = new PassThrough();
-      (input).isTTY = true;
-      (input).setRawMode = () => {};
+      input.isTTY = true;
+      input.setRawMode = () => {};
       input.resume();
 
       const output = createNullWritable();
-
       const alerts = [];
 
       await runTui(
@@ -62,23 +63,23 @@ test(
           io: { input, output },
           services: {
             discoverTargetsWithOpenAI: async () => {
-              const moduleName = "example.com/brrrsentry-smoke/panic-bug";
+              const moduleName = "example.com/brrrsentry-smoke/grammar-json-bug";
               const moduleRoot = targetDir;
-              const filePath = path.join(moduleRoot, "panic.go");
+              const filePath = path.join(moduleRoot, "parse.go");
 
               const candidate = {
-                id: "e2e-fixture-1",
+                id: "e2e-grammar-fixture-1",
                 language: "go",
                 filePath,
-                relativePath: "panic.go",
+                relativePath: "parse.go",
                 moduleName,
                 moduleRoot,
-                symbol: "CrashOnSeed",
-                signature: "func CrashOnSeed(data []byte) ([]byte, error)",
+                symbol: "Parse",
+                signature: "func Parse(data []byte) (string, error)",
                 kind: "function",
                 score: 100,
-                reasons: ["E2E fixture: panics on seed input"],
-                packageName: "panicbug",
+                reasons: ["E2E fixture: JSON string parser with a trivial panic"],
+                packageName: "grammarjson",
                 importPath: moduleName,
                 hasReceiver: false,
                 isExported: true,
@@ -98,23 +99,29 @@ test(
                 notes: ["E2E: stub discovery result"],
               };
             },
-            buildCampaignPlanWithOpenAI: async (config, target, fuzzMode, scopeMode) => {
-              void config;
-              void target;
-              void fuzzMode;
-              void scopeMode;
+            buildCampaignPlanWithOpenAI: async () => {
               return {
-                title: "E2E panic-bug campaign",
+                title: "E2E grammar-json-bug campaign",
                 oracleStrategy: "Use gosentry crash output as the oracle.",
-                grammarSummary: "Byte fuzzing only for this E2E case.",
-                corpusIdeas: ["{}", "[]"],
+                grammarSummary: "Generate JSON strings for the Parse entrypoint.",
+                corpusIdeas: ["\"a\"", "\"b\"", "\"abba\""],
                 panicOnCandidates: [],
                 reportExpectations: ["record real target bugs in FOUND_ISSUES.md"],
               };
             },
+            generateNautilusGrammarWithOpenAI: async (_config, input) => {
+              grammarGenerationCalled = true;
+              assert.equal(input.plan.fuzzMode, "grammar");
+              assert.match(input.harnessSource, /targetpkg\.Parse/);
+
+              return {
+                grammarJson: generatedGrammar,
+                notes: ["E2E: deterministic JSON string grammar"],
+              };
+            },
           },
           driver: {
-            fuzzMode: "byte",
+            fuzzMode: "grammar",
             scopeMode: "narrow",
             targetIndex: 0,
             afterResult: "run",
@@ -130,12 +137,15 @@ test(
         },
       );
 
+      assert.equal(grammarGenerationCalled, true);
+
       const bugAlert = alerts.find((alert) => alert.title === "Bug Alert");
       assert.ok(
         bugAlert,
         `expected Bug Alert, got: ${alerts.map((alert) => alert.title).join(", ")}`,
       );
       assert.equal(bugAlert.kind, "error");
+      assert.match(bugAlert.body, /Fuzzing found a real bug/);
 
       const campaignsRoot = path.join(targetDir, ".brrrsentry", "campaigns");
       const campaignDirs = (await fs.readdir(campaignsRoot, { withFileTypes: true }))
@@ -143,12 +153,18 @@ test(
         .map((entry) => entry.name);
       assert.equal(campaignDirs.length, 1);
 
-      const issuesPath = path.join(
-        campaignsRoot,
-        campaignDirs[0],
-        "FOUND_ISSUES.md",
+      const campaignRoot = path.join(campaignsRoot, campaignDirs[0]);
+      const grammar = await fs.readFile(
+        path.join(campaignRoot, "grammar", "grammar.json"),
+        "utf8",
       );
-      const issues = await fs.readFile(issuesPath, "utf8");
+      assert.equal(grammar, generatedGrammar);
+
+      const fuzzScript = await fs.readFile(path.join(campaignRoot, "fuzz.bash"), "utf8");
+      assert.match(fuzzScript, /--use-grammar/);
+      assert.match(fuzzScript, /--grammar "\$CAMPAIGN_ROOT\/grammar\/grammar\.json"/);
+
+      const issues = await fs.readFile(path.join(campaignRoot, "FOUND_ISSUES.md"), "utf8");
       assert.match(issues, /verdict: real_bug/);
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });

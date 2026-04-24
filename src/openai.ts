@@ -8,8 +8,13 @@ import OpenAI, { APIUserAbortError } from "openai";
 import {
   buildAutoJudgePrompt,
   buildCampaignPlanPrompt,
+  buildNautilusGrammarPrompt,
   buildTargetDiscoveryPrompt,
 } from "./prompts.js";
+import {
+  formatNautilusGrammarJson,
+  type NautilusGrammar,
+} from "./campaign.js";
 import {
   hydrateDiscoveredTargets,
   type DiscoveredTargetDraft,
@@ -963,6 +968,39 @@ export async function repairGoHarnessWithOpenAI(
 
   return {
     harnessSource: payload.harness_source?.trim() ?? "",
+    notes: payload.notes ?? [],
+  };
+}
+
+export async function generateNautilusGrammarWithOpenAI(
+  config: AppConfig,
+  input: {
+    plan: CampaignPlan;
+    harnessSource: string;
+    targetFileSnippet: string;
+  },
+  callbacks?: ModelProgressCallbacks,
+): Promise<{ grammarJson: string; notes: string[] }> {
+  const prompt = buildNautilusGrammarPrompt({
+    targetDir: config.targetDir,
+    fuzzMode: input.plan.fuzzMode,
+    scopeMode: input.plan.scopeMode,
+    selectedTargetSummary: summarizeTarget(input.plan.target),
+    harnessSource: input.harnessSource,
+    targetFileSnippet: input.targetFileSnippet,
+  });
+
+  const payload = await createToolCallingJsonResponse<{
+    grammar?: NautilusGrammar;
+    notes?: string[];
+  }>(config, prompt, { targetDir: config.targetDir }, callbacks);
+
+  if (!payload.grammar) {
+    throw new Error("model returned no grammar");
+  }
+
+  return {
+    grammarJson: formatNautilusGrammarJson(payload.grammar),
     notes: payload.notes ?? [],
   };
 }

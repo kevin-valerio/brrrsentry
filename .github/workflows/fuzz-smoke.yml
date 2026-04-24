@@ -37,8 +37,13 @@ jobs:
           cd third_party/gosentry/src
           ./make.bash
 
+      - name: Grammar end-to-end (grammar-json-bug)
+        run: node --test tests/e2e/grammar-json-bug.test.mjs
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
       - name: Run gosentry smoke
-        run: node scripts/ci/gosentry-smoke.mjs | tee /tmp/gosentry-smoke.txt
+        run: node ci/gosentry-smoke.mjs | tee /tmp/gosentry-smoke.txt
 
       - name: Job summary
         if: always()
@@ -50,4 +55,3 @@ jobs:
           else
             echo "(no output captured)" >> "$GITHUB_STEP_SUMMARY"
           fi
-

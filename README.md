@@ -69,9 +69,9 @@ language (Go, Rust, C/C++, etc).
 | `.brrrsentry/campaigns/<slug>/corpus/` | Initial corpus notes |
 | `.brrrsentry/campaigns/<slug>/reports/` | Place for replay and coverage output |
 
-In `grammar` mode, brrrsentry tries to reuse an existing Nautilus JSON grammar from
-the target module (looks under `testdata/`, `grammar/`, and `grammars/`). If none
-is found, it writes a small placeholder grammar.
+In `grammar` mode, brrrsentry asks the model to generate a target-specific
+Nautilus JSON grammar during campaign generation. The grammar is written to
+`grammar/grammar.json` and `fuzz.bash` runs gosentry with `--use-grammar`.
 
 ## Run
 
@@ -109,7 +109,7 @@ node dist/index.js /path/to/target-repo
 GitHub Actions:
 
 1. `.github/workflows/ci.yml` runs TypeScript typecheck.
-2. `.github/workflows/fuzz-smoke.yml` (scheduled + manual) builds gosentry on linux and runs a TUI end-to-end test (`node --test tests/e2e/tui-panic-bug.test.mjs`, requires `OPENAI_API_KEY`).
+2. `.github/workflows/fuzz-smoke.yml` (scheduled + manual) builds gosentry on linux and runs a grammar end-to-end test (`node --test tests/e2e/grammar-json-bug.test.mjs`, requires `OPENAI_API_KEY`).
 3. `.github/workflows/fuzz-smoke.yml` also runs `ci/gosentry-smoke.mjs` (expects at least one crash).
 
 Smoke fixtures used by CI live in `tests/smoke/` (for example `tests/smoke/panic-bug`).
@@ -119,18 +119,20 @@ Local:
 ```bash
 npm run check
 npm run build
+npm run test:e2e
 ```
 
 ## Model calls
 
 `OPENAI_API_KEY` is required. `brrrsentry` calls the model API to discover
-targets, draft the campaign plan, and auto-judge fuzz findings.
+targets, draft the campaign plan, generate grammar-mode grammars, and
+auto-judge fuzz findings.
 
 Requests are sent with `store: false`, so they are not saved in the OpenAI
 dashboard logs.
 
-While the model is discovering targets or drafting the harness/plan, the Flow pane shows
-high-level progress plus a reasoning summary (no raw chain-of-thought).
+While the model is discovering targets or drafting the harness, grammar, or plan,
+the Flow pane shows high-level progress plus a reasoning summary (no raw chain-of-thought).
 The selector is also briefly locked after each choice so a fast double Enter
 cannot select the next step twice.
 

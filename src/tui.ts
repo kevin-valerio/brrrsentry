@@ -15,6 +15,7 @@ import {
   buildCampaignPlanWithOpenAI,
   discoverTargetsWithOpenAI,
   draftGoHarnessWithOpenAI,
+  generateNautilusGrammarWithOpenAI,
   repairGoHarnessWithOpenAI,
 } from "./openai.js";
 import { FUZZING_GUIDELINES } from "./guidelines.js";
@@ -44,6 +45,7 @@ type TuiServices = {
   discoverTargetsWithOpenAI: typeof discoverTargetsWithOpenAI;
   draftGoHarnessWithOpenAI: typeof draftGoHarnessWithOpenAI;
   repairGoHarnessWithOpenAI: typeof repairGoHarnessWithOpenAI;
+  generateNautilusGrammarWithOpenAI: typeof generateNautilusGrammarWithOpenAI;
   buildCampaignPlanWithOpenAI: typeof buildCampaignPlanWithOpenAI;
   autoJudgeFindingWithOpenAI: typeof autoJudgeFindingWithOpenAI;
   spawnStreaming: typeof spawnStreaming;
@@ -90,6 +92,7 @@ interface AppState {
   selectedTarget?: CandidateTarget;
   plan?: CampaignPlan;
   draftedHarnessSource?: string;
+  draftedGrammarJson?: string;
   generated?: GeneratedCampaign;
   runCores?: string;
   runCommand?: string;
@@ -306,6 +309,8 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
       options?.services?.draftGoHarnessWithOpenAI ?? draftGoHarnessWithOpenAI,
     repairGoHarnessWithOpenAI:
       options?.services?.repairGoHarnessWithOpenAI ?? repairGoHarnessWithOpenAI,
+    generateNautilusGrammarWithOpenAI:
+      options?.services?.generateNautilusGrammarWithOpenAI ?? generateNautilusGrammarWithOpenAI,
     buildCampaignPlanWithOpenAI:
       options?.services?.buildCampaignPlanWithOpenAI ?? buildCampaignPlanWithOpenAI,
     autoJudgeFindingWithOpenAI:
@@ -1070,6 +1075,7 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
           `FOUND_ISSUES.md: ${state.generated.issuesPath}`,
           `fuzz.bash: ${state.generated.fuzzScriptPath}`,
           `Harness: ${state.generated.harnessPath}`,
+          `Grammar: ${state.generated.grammarPath}`,
           "",
           "Next: choose Run now to start fuzzing from the TUI.",
           ...runLines,
@@ -1469,6 +1475,31 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
     return harnessSource;
   }
 
+  async function draftNautilusGrammar(
+    plan: CampaignPlan,
+    harnessSource: string,
+  ): Promise<string> {
+    const snippet = await readTargetSnippet(plan.target);
+    setStatusFlow("drafting grammar JSON");
+    const { grammarJson } = await services.generateNautilusGrammarWithOpenAI(
+      config,
+      {
+        plan,
+        harnessSource,
+        targetFileSnippet: snippet,
+      },
+      {
+        onReasoningSummary: setThinkingReasoningSummary,
+      },
+    );
+
+    if (!grammarJson.trim()) {
+      throw new Error("model returned an empty grammar");
+    }
+
+    return grammarJson;
+  }
+
   async function buildPlanFlow(target: CandidateTarget): Promise<boolean> {
     if (!state.fuzzMode || !state.scopeMode) {
       throw new Error("wizard state is incomplete");
@@ -1485,10 +1516,12 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
       "drafting harness code",
       "compiling harness",
       "drafting campaign plan",
+      ...(state.fuzzMode === "grammar" ? ["drafting grammar JSON"] : []),
       "validating plan JSON",
     ]);
 
     let plan = services.createFallbackPlan(target, state.fuzzMode, state.scopeMode);
+    state.draftedGrammarJson = undefined;
 
     try {
       state.draftedHarnessSource = await draftRunnableHarness(plan);
@@ -1522,6 +1555,21 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
       stopModelProgress();
     }
 
+    if (state.fuzzMode === "grammar") {
+      try {
+        state.draftedGrammarJson = await draftNautilusGrammar(
+          plan,
+          state.draftedHarnessSource!,
+        );
+        pushLog("Grammar: generated Nautilus JSON grammar");
+      } catch (error) {
+        state.draftedGrammarJson = undefined;
+        setStatus("Grammar generation failed", (error as Error).message);
+        pushLog(`Grammar generation failed for ${target.symbol}.`);
+        return false;
+      }
+    }
+
     state.plan = plan;
     state.step = "review";
     setStatus("Review campaign plan", plan.title);
@@ -1544,6 +1592,7 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
         moduleRoot: state.plan.target.moduleRoot,
       },
       state.draftedHarnessSource,
+      state.draftedGrammarJson,
     );
     state.step = "result";
     setStatus("Campaign generated", `.brrrsentry/campaigns/${state.plan.slug}`);
@@ -1944,6 +1993,7 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
         state.selectedTarget = undefined;
         state.plan = undefined;
         state.draftedHarnessSource = undefined;
+        state.draftedGrammarJson = undefined;
         state.step = "target";
         setStatus("Harness generation failed", "Pick a different target.");
         redraw();
