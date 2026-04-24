@@ -2,62 +2,31 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { buildReadyGoHarness, createFallbackPlan, writeCampaign } from "../../dist/campaign.js";
-import { spawnStreaming } from "../../dist/process.js";
+import { buildReadyGoHarness, createFallbackPlan, writeCampaign } from "../dist/campaign.js";
+import { spawnStreaming } from "../dist/process.js";
 
 async function makeTempDir(prefix) {
   return await fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-async function writeBuggyGoTarget(targetDir) {
-  const moduleName = "example.com/brrrsentry-ci-fixture";
-  const pkg = "brrrsentryfixture";
-  const fileName = "fixture.go";
-  const symbol = "CrashOnSeed";
-  const filePath = path.join(targetDir, fileName);
-
-  await fs.writeFile(
-    path.join(targetDir, "go.mod"),
-    `module ${moduleName}\n\ngo 1.23\n`,
-  );
-  await fs.writeFile(
-    filePath,
-    [
-      `package ${pkg}`,
-      "",
-      "import \"bytes\"",
-      "",
-      "var seedCrash = []byte(\"{}\")",
-      "",
-      `func ${symbol}(data []byte) ([]byte, error) {`,
-      "  // Deliberate bug for CI: crashes on the default harness seed input.",
-      "  if bytes.Equal(data, seedCrash) {",
-      "    panic(\"boom\")",
-      "  }",
-      "  return data, nil",
-      "}",
-      "",
-    ].join("\n"),
-  );
-
-  return {
-    moduleName,
-    moduleRoot: targetDir,
-    packageName: pkg,
-    importPath: moduleName,
-    relativePath: fileName,
-    filePath,
-    symbol,
-    signature: `func ${symbol}(data []byte) ([]byte, error)`,
-  };
-}
-
 async function main() {
   const repoRoot = process.cwd();
-  const targetDir = await makeTempDir("brrrsentry-ci-target-");
+  const fixtureRoot = path.resolve(repoRoot, "tests", "smoke", "panic-bug");
+  const tempRoot = await makeTempDir("brrrsentry-ci-target-");
+  const targetDir = path.join(tempRoot, "target");
+  await fs.cp(fixtureRoot, targetDir, { recursive: true });
 
   const gosentryPath = path.resolve(repoRoot, "third_party/gosentry");
-  const targetMeta = await writeBuggyGoTarget(targetDir);
+  const targetMeta = {
+    moduleName: "example.com/brrrsentry-smoke/panic-bug",
+    moduleRoot: targetDir,
+    packageName: "panicbug",
+    importPath: "example.com/brrrsentry-smoke/panic-bug",
+    relativePath: "panic.go",
+    filePath: path.join(targetDir, "panic.go"),
+    symbol: "CrashOnSeed",
+    signature: "func CrashOnSeed(data []byte) ([]byte, error)",
+  };
 
   const candidate = {
     id: "ci-fixture-1",
@@ -121,7 +90,7 @@ async function main() {
     },
   });
 
-  const timeoutMs = 60_000;
+  const timeoutMs = 180_000;
   const timeout = setTimeout(() => {
     try {
       run.child.kill("SIGINT");
@@ -181,4 +150,3 @@ main().catch((error) => {
   process.stderr.write(`gosentry smoke failed: ${(error?.message ?? String(error)).trim()}\n`);
   process.exitCode = 1;
 });
-

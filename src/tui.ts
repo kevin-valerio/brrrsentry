@@ -479,6 +479,7 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
   let inputUnlockTimer: NodeJS.Timeout | undefined;
   let lastUserActionAtMs = 0;
   let lastUserActionIndex = -1;
+  let mouseCaptureEnabled = true;
   const outputStdoutLines: string[] = [];
   const outputStdoutTailLimit = 900;
   const outputStdoutRenderLimit = 320;
@@ -491,6 +492,28 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
     if (input && typeof input.write === "function") {
       input.write(data);
     }
+  }
+
+  function setMouseCaptureEnabled(enabled: boolean): void {
+    if (enabled === mouseCaptureEnabled) {
+      return;
+    }
+
+    mouseCaptureEnabled = enabled;
+    if (mouseCaptureEnabled) {
+      screen.program.enableMouse();
+    } else {
+      screen.program.disableMouse();
+    }
+  }
+
+  function toggleMouseCapture(): void {
+    setMouseCaptureEnabled(!mouseCaptureEnabled);
+    redraw();
+  }
+
+  function footerWithMouse(text: string): string {
+    return `${text} | mouse: ${mouseCaptureEnabled ? "on" : "off"} (m)`;
   }
 
   function stopDriver(): void {
@@ -563,7 +586,11 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
         state.runFindings &&
         (state.runFindings.length === 0 || Boolean(state.runAutoJudge))
       ) {
-        driverWrite("q");
+        stopSpinner();
+        clearInputUnlockTimer();
+        stopDriver();
+        screen.destroy();
+        return;
       }
     };
 
@@ -595,7 +622,7 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
     const content = truncateForAlert(safeBody, 1800);
 
     await new Promise<void>((resolve) => {
-      alertMessage.display(content, 0, () => resolve());
+      alertMessage.display(content, driver?.dismissAlerts ? 50 : 0, () => resolve());
     });
   }
 
@@ -1108,13 +1135,13 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
 
     if (state.step === "mode") {
       renderChoices(list, modeChoices);
-      setFooter("Arrows + Enter: choose fuzz mode | q: quit");
+      setFooter(footerWithMouse("Arrows + Enter: choose fuzz mode | q: quit"));
     } else if (state.step === "scope") {
       renderChoices(list, scopeChoices);
-      setFooter("Arrows + Enter: choose scope mode | q: quit");
+      setFooter(footerWithMouse("Arrows + Enter: choose scope mode | q: quit"));
     } else if (state.step === "target" && state.discovery) {
       renderTargets(list, state.discovery.recommended);
-      setFooter("Arrows: choose target | Enter: select | q: quit");
+      setFooter(footerWithMouse("Arrows: choose target | Enter: select | q: quit"));
     } else if (state.step === "review" && state.plan) {
       const actions: StepChoice[] = [
         {
@@ -1124,7 +1151,7 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
         },
       ];
       renderChoices(list, actions);
-      setFooter("Enter: generate files | q: quit");
+      setFooter(footerWithMouse("Enter: generate files | q: quit"));
     } else if (state.step === "result" && state.generated) {
       const actions: StepChoice[] = [
         {
@@ -1139,12 +1166,12 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
         },
       ];
       renderChoices(list, actions);
-      setFooter("Enter: action | q: quit");
+      setFooter(footerWithMouse("Enter: action | q: quit"));
     } else if (state.step === "run") {
       list.hide();
       flowLog.hide();
       outputBox.focus();
-      setFooter("s: stop fuzzing | b: back | q: quit");
+      setFooter(footerWithMouse("s: stop fuzzing | b: back | q: quit"));
     }
 
     refreshHarnessPane();
@@ -2008,6 +2035,10 @@ export async function runTui(config: AppConfig, options?: RunTuiOptions): Promis
     state.step = "result";
     redraw();
     list.focus();
+  });
+
+  screen.key(["m"], () => {
+    toggleMouseCapture();
   });
 
   screen.key(["q", "C-c"], () => {

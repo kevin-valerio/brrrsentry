@@ -9,8 +9,27 @@ It should help a user go from:
 2. answering adaptive fuzzing questions in a full-screen TUI
 3. discovering good fuzz targets
 4. generating a campaign workspace under `.brrrsentry/`
-5. generating harness, grammar, corpus, and campaign notes
+5. generating harness, grammar (if required), corpus, and campaign notes
 6. asking before the real fuzzing run starts
+7. then when it runs if the app detects a bug (an LLM should monitor the output) there's an agent
+   checking if that's a false positive (harness issue) or not
+8. if its' a false positive it fixes the bug, and re-run, if it's a true positive it shows an alert
+   bug detected
+
+the questions are basically do the user wants a narrow harness like per-function or more end-to-end
+but also does he want a byte fuzzing or structure-aware or let the app auto-decide or grammar
+fuzzing
+
+don't forget to check gosentry readme thats' important to understand how it works and how to tailor
+it
+
+Really important: the application is agentic and can execute many commmands. That means that many
+goals should be achieved by sending a prompt to the model we're using, and it executes code etc, a
+bit like how codex works. We just then parse the output in json and adapt the ui accordingly
+we want to do agentic looping and workflows
+
+remember keep the code simple, we don't want offline stuff, we want some agents interacting with
+each others and have some kind of loops like agent to agent communication, nothing complex
 
 Important implementation notes
 

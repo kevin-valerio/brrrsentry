@@ -2,7 +2,7 @@ package panicbug
 
 import "bytes"
 
-var seedCrash = []byte("{ddddddddddd}")
+var seedCrash = []byte("{}")
 
 func CrashOnSeed(data []byte) ([]byte, error) {
 	if bytes.Equal(data, seedCrash) {

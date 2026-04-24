@@ -69,6 +69,10 @@ language (Go, Rust, C/C++, etc).
 | `.brrrsentry/campaigns/<slug>/corpus/` | Initial corpus notes |
 | `.brrrsentry/campaigns/<slug>/reports/` | Place for replay and coverage output |
 
+In `grammar` mode, brrrsentry tries to reuse an existing Nautilus JSON grammar from
+the target module (looks under `testdata/`, `grammar/`, and `grammars/`). If none
+is found, it writes a small placeholder grammar.
+
 ## Run
 
 Use the TUI directly in dev mode:
@@ -80,6 +84,10 @@ npm run dev -- /path/to/target-repo
 In the TUI, use arrows + Enter (or single mouse click) to select.
 The `Stdout` pane shows status, model thinking, and gosentry output. During a
 fuzz run it expands to full width. Press `s` to stop fuzzing.
+
+If you want to copy text from the UI (especially from `Stdout`), press `m` to
+toggle mouse capture off. When mouse capture is off, terminal text selection
+works again. Press `m` again to re-enable mouse click selection.
 
 Or run the built CLI:
 
@@ -98,21 +106,19 @@ node dist/index.js /path/to/target-repo
 
 ## CI / CD
 
-We keep 3 end-to-end cases green:
-
-1. CI builds gosentry (linux), runs a short fuzzing smoke, and expects at least one crash.
-2. A harness logic bug produces a false positive, auto-judge returns a harness fix, and brrrsentry auto-reruns once.
-3. A real target bug triggers triage and shows a blocking alert in the TUI.
-
 GitHub Actions:
 
-1. `.github/workflows/ci.yml` runs TypeScript typecheck + TUI scenario tests.
-2. `.github/workflows/fuzz-smoke.yml` (scheduled + manual) builds gosentry on linux and runs `scripts/ci/gosentry-smoke.mjs`.
+1. `.github/workflows/ci.yml` runs TypeScript typecheck.
+2. `.github/workflows/fuzz-smoke.yml` (scheduled + manual) builds gosentry on linux and runs a TUI end-to-end test (`node --test tests/e2e/tui-panic-bug.test.mjs`, requires `OPENAI_API_KEY`).
+3. `.github/workflows/fuzz-smoke.yml` also runs `ci/gosentry-smoke.mjs` (expects at least one crash).
+
+Smoke fixtures used by CI live in `tests/smoke/` (for example `tests/smoke/panic-bug`).
 
 Local:
 
 ```bash
-npm test
+npm run check
+npm run build
 ```
 
 ## Model calls

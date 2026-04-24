@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 
 import type {
@@ -241,6 +242,76 @@ function buildGrammarJson(plan: CampaignPlan): string {
   );
 }
 
+type NautilusGrammar = Array<[string, string]>;
+
+function isNautilusGrammar(value: unknown): value is NautilusGrammar {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  return value.every((rule) => {
+    if (!Array.isArray(rule) || rule.length !== 2) {
+      return false;
+    }
+    const [lhs, rhs] = rule;
+    return (
+      typeof lhs === "string" &&
+      lhs.trim().length > 0 &&
+      /^[A-Z]/.test(lhs.trim()) &&
+      typeof rhs === "string"
+    );
+  });
+}
+
+async function readNautilusGrammarFile(filePath: string): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isNautilusGrammar(parsed)) {
+      return null;
+    }
+
+    return `${JSON.stringify(parsed, null, 2)}\n`;
+  } catch {
+    return null;
+  }
+}
+
+async function detectExistingGrammarJson(params: {
+  searchRoot: string;
+}): Promise<string | null> {
+  const roots = [
+    path.join(params.searchRoot, "testdata"),
+    path.join(params.searchRoot, "grammar"),
+    path.join(params.searchRoot, "grammars"),
+  ];
+
+  for (const root of roots) {
+    let entries: Dirent[] = [];
+    try {
+      entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    const files = entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .filter((name) => !name.startsWith(".") && name.toLowerCase().endsWith(".json"))
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => path.join(root, name));
+
+    for (const filePath of files) {
+      const maybeGrammar = await readNautilusGrammarFile(filePath);
+      if (maybeGrammar) {
+        return maybeGrammar;
+      }
+    }
+  }
+
+  return null;
+}
+
 function buildFuzzDoc(plan: CampaignPlan): string {
   return [
     `Campaign: ${plan.title}`,
@@ -428,7 +499,14 @@ export async function writeCampaign(
     }),
   );
   await fs.writeFile(harnessPath, resolvedHarnessSource);
-  await fs.writeFile(path.join(grammarDir, "grammar.json"), buildGrammarJson(plan));
+
+  const grammarRoot = module?.moduleRoot ?? plan.target.moduleRoot ?? config.targetDir;
+  const grammarJson =
+    plan.fuzzMode === "grammar"
+      ? (await detectExistingGrammarJson({ searchRoot: grammarRoot })) ?? buildGrammarJson(plan)
+      : buildGrammarJson(plan);
+  await fs.writeFile(path.join(grammarDir, "grammar.json"), grammarJson);
+
   await fs.writeFile(path.join(corpusDir, "README.md"), plan.corpusIdeas.join("\n"));
   await fs.writeFile(path.join(campaignRoot, "campaign.json"), JSON.stringify(plan, null, 2));
   await fs.writeFile(path.join(campaignRoot, "FUZZ.md"), buildFuzzDoc(plan));
